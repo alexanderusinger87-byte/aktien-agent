@@ -3,24 +3,30 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import plotly.graph_objects as go
 
 # ==============================================================================
-# CONFIG & SECTOR PROFILES
+# STREAMLIT PAGE CONFIG & SECTOR PROFILES
 # ==============================================================================
 
-# Sektorspezifische Gewichtungen (Summe = 1.0)
+st.set_page_config(
+    page_title="Aktien-Screener V9",
+    page_icon="📈",
+    layout="wide"
+)
+
 SECTOR_WEIGHTS = {
     'Financial Services': {
-        'valuation': 0.35,  # Fokus auf KGV / KBV
-        'quality': 0.35,    # ROE, Margen, Payout
-        'risk': 0.20,       # Eigenkapitalquote (statt Net Debt/EBITDA)
+        'valuation': 0.35,
+        'quality': 0.35,
+        'risk': 0.20,
         'tech': 0.10
     },
     'Technology': {
-        'valuation': 0.20,  # KGV/PEG weniger strikt
-        'quality': 0.40,    # Hohes Umsatz-/EPS-Wachstum, Bruttomarge
+        'valuation': 0.20,
+        'quality': 0.40,
         'risk': 0.15,
-        'tech': 0.25        # Trend & Momentum wichtiger
+        'tech': 0.25
     },
     'Default': {
         'valuation': 0.25,
@@ -35,31 +41,26 @@ SECTOR_WEIGHTS = {
 # ==============================================================================
 
 def safe_get(dictionary, key, default=np.nan):
-    """Sicheres Auslesen aus Dictionaries mit Fallback."""
     val = dictionary.get(key, default)
     return default if val is None else val
 
 def clean_percentage(val):
-    """Bringt Prozentwerte auf einheitliches Dezimalformat (z.B. 0.15 für 15%)."""
     if pd.isna(val):
         return np.nan
-    if abs(val) > 2.0:  # Wert liegt vermutlich als 15.0 statt 0.15 vor
+    if abs(val) > 2.0:
         return val / 100.0
     return val
 
 @st.cache_data(ttl=3600*12)
 def fetch_stock_data(ticker_symbol):
-    """Treibender Data Fetcher für Yahoo Finance mit robuster Fehlerbehandlung."""
     try:
         ticker = yf.Ticker(ticker_symbol)
         info = ticker.info
         
-        # Hist. Kurse (1 Jahr für SMA200 & exakte 6M-Performance)
         hist = ticker.history(period="1y")
         if hist.empty or len(hist) < 100:
             return None
 
-        # Finanzberichte
         financials = ticker.financials
         balance_sheet = ticker.balance_sheet
         cashflow = ticker.cashflow
@@ -71,7 +72,7 @@ def fetch_stock_data(ticker_symbol):
             'balance_sheet': balance_sheet,
             'cashflow': cashflow
         }
-    except Exception as e:
+    except Exception:
         return None
 
 # ==============================================================================
@@ -88,10 +89,12 @@ def calculate_advanced_metrics(data):
     metrics = {}
     sector = safe_get(info, 'sector', 'Default')
     metrics['sector'] = sector
+    metrics['name'] = safe_get(info, 'shortName', safe_get(info, 'symbol'))
 
-    # --- 1. Preis & Momentum (Exakte 6M) ---
+    # 1. Preis & Momentum (Exakte 6M)
     close = hist['Close']
     current_price = close.iloc[-1]
+    metrics['current_price'] = current_price
     
     cutoff_6m = datetime.now() - timedelta(days=180)
     hist_6m = close[close.index >= cutoff_6m.strftime('%Y-%m-%d')]
@@ -102,36 +105,33 @@ def calculate_advanced_metrics(data):
     metrics['above_sma200'] = current_price > metrics['sma_200']
     metrics['dist_52w_high'] = (current_price - close.max()) / close.max()
 
-    # --- 2. Bewertungskennzahlen (Valuation) ---
+    # 2. Bewertungskennzahlen
     metrics['pe_forward'] = safe_get(info, 'forwardPE')
     metrics['peg_ratio'] = safe_get(info, 'pegRatio')
     metrics['pb_ratio'] = safe_get(info, 'priceToBook')
     
-    # FCF Yield (Ohne Dopplung zu P/FCF im Valuation Score)
     fcf = safe_get(info, 'freeCashflow')
     market_cap = safe_get(info, 'marketCap')
     if pd.isna(fcf) and not cf.empty:
         try:
             op_cf = cf.loc['Operating Cash Flow'].iloc[0]
             capex = cf.loc['Capital Expenditure'].iloc[0] if 'Capital Expenditure' in cf.index else 0
-            fcf = op_cf + capex  # CapEx ist meist negativ
-        except:
+            fcf = op_cf + capex
+        except Exception:
             fcf = np.nan
             
     metrics['fcf_yield'] = (fcf / market_cap) if (fcf and market_cap) else np.nan
 
-    # --- 3. Qualität & Rentabilität (Quality) ---
+    # 3. Qualität & Rentabilität
     metrics['roe'] = clean_percentage(safe_get(info, 'returnOnEquity'))
     metrics['eps_growth_5y'] = clean_percentage(safe_get(info, 'earningsGrowth'))
     metrics['payout_ratio'] = clean_percentage(safe_get(info, 'payoutRatio'))
 
-    # Dynamische ROIC-Berechnung mit effektivem Steuersatz
     try:
         ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else fin.loc['Operating Income'].iloc[0]
         inc_tax = fin.loc['Tax Provision'].iloc[0] if 'Tax Provision' in fin.index else 0
         pre_tax = fin.loc['Pretax Income'].iloc[0] if 'Pretax Income' in fin.index else 1
         
-        # Effektiver Steuersatz (Gedeckelt zwischen 15% und 35%)
         tax_rate = inc_tax / pre_tax if pre_tax > 0 else 0.21
         tax_rate = max(0.15, min(tax_rate, 0.35))
         
@@ -143,28 +143,25 @@ def calculate_advanced_metrics(data):
         
         invested_capital = total_assets - curr_liab - cash
         metrics['roic'] = nopat / invested_capital if invested_capital > 0 else np.nan
-    except:
+    except Exception:
         metrics['roic'] = np.nan
 
-    # Bruttomarge (Gross Margin)
     try:
         gross_profit = fin.loc['Gross Profit'].iloc[0]
         total_rev = fin.loc['Total Revenue'].iloc[0]
         metrics['gross_margin'] = gross_profit / total_rev
-    except:
+    except Exception:
         metrics['gross_margin'] = safe_get(info, 'grossMargins')
 
-    # --- 4. Risikokennzahlen (Risk) ---
+    # 4. Risikokennzahlen
     try:
         tot_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0
         cash_eq = bs.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in bs.index else 0
         net_debt = tot_debt - cash_eq
         
         ebitda = fin.loc['Normalized EBITDA'].iloc[0] if 'Normalized EBITDA' in fin.index else fin.loc['EBITDA'].iloc[0]
-        
-        # Negatives EBITDA abfangen
         metrics['net_debt_ebitda'] = (net_debt / ebitda) if ebitda > 0 else 99.0
-    except:
+    except Exception:
         metrics['net_debt_ebitda'] = np.nan
 
     metrics['current_ratio'] = safe_get(info, 'currentRatio')
@@ -184,7 +181,7 @@ def score_stock_v9(metrics):
 
     scores = {}
 
-    # 1. Valuation Score (0 - 100)
+    # 1. Valuation
     v_scores = []
     pe = metrics.get('pe_forward')
     if pd.notna(pe) and pe > 0:
@@ -196,7 +193,7 @@ def score_stock_v9(metrics):
 
     scores['valuation'] = np.mean(v_scores) if v_scores else 50.0
 
-    # 2. Quality Score (0 - 100)
+    # 2. Quality
     q_scores = []
     roic = metrics.get('roic')
     if pd.notna(roic):
@@ -212,7 +209,7 @@ def score_stock_v9(metrics):
 
     scores['quality'] = np.mean(q_scores) if q_scores else 50.0
 
-    # 3. Risk Score (0 - 100)
+    # 3. Risk
     r_scores = []
     if sector != 'Financial Services':
         nd_ebitda = metrics.get('net_debt_ebitda')
@@ -229,7 +226,7 @@ def score_stock_v9(metrics):
 
     scores['risk'] = np.mean(r_scores) if r_scores else 50.0
 
-    # 4. Technical / Momentum Score (0 - 100)
+    # 4. Technical
     t_scores = []
     if metrics.get('above_sma200', False):
         t_scores.append(80)
@@ -242,7 +239,6 @@ def score_stock_v9(metrics):
 
     scores['tech'] = np.mean(t_scores) if t_scores else 50.0
 
-    # Gesamter Sektor-gewichteter Score
     total_score = (
         scores['valuation'] * weights['valuation'] +
         scores['quality'] * weights['quality'] +
@@ -251,3 +247,127 @@ def score_stock_v9(metrics):
     )
 
     return round(total_score, 1), scores
+
+# ==============================================================================
+# STREAMLIT UI & DASHBOARD
+# ==============================================================================
+
+def main():
+    st.title("📊 Quant-Aktien-Screener V9")
+    st.caption("Sektor-adaptives Quant-Scoring basierend auf Valuation, Quality, Risk & Momentum")
+
+    # Sidebar: Ticker-Eingabe & Filter
+    st.sidebar.header("⚙️ Konfiguration")
+    default_tickers = "NVDA, MSFT, AAPL, GOOGL, AMZN, TTE.PA, ING, PFE, KO, NKE"
+    ticker_input = st.sidebar.text_area(
+        "Aktien Ticker (kommagetrennt):", 
+        value=default_tickers, 
+        height=100
+    )
+    
+    min_score = st.sidebar.slider("Mindest-Gesamtscore", 0, 100, 50)
+
+    tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+
+    if st.sidebar.button("🚀 Screening starten", type="primary") or "results" not in st.session_state:
+        results = []
+        progress_bar = st.progress(0)
+        
+        for idx, symbol in enumerate(tickers):
+            data = fetch_stock_data(symbol)
+            if data:
+                metrics = calculate_advanced_metrics(data)
+                total_score, sub_scores = score_stock_v9(metrics)
+                
+                results.append({
+                    'Ticker': symbol,
+                    'Name': metrics['name'],
+                    'Sektor': metrics['sector'],
+                    'Kurs': metrics['current_price'],
+                    'Gesamtscore': total_score,
+                    'Valuation': round(sub_scores['valuation'], 1),
+                    'Quality': round(sub_scores['quality'], 1),
+                    'Risk': round(sub_scores['risk'], 1),
+                    'Tech': round(sub_scores['tech'], 1),
+                    'KGV (Fwd)': metrics['pe_forward'],
+                    'PEG': metrics['peg_ratio'],
+                    'ROIC': metrics['roic'],
+                    'Gross Margin': metrics['gross_margin'],
+                    'metrics_raw': metrics,
+                    'sub_scores': sub_scores
+                })
+            progress_bar.progress((idx + 1) / len(tickers))
+        
+        progress_bar.empty()
+        st.session_state["results"] = pd.DataFrame(results)
+
+    df_results = st.session_state.get("results", pd.DataFrame())
+
+    if not df_results.empty:
+        # Filter anwenden
+        filtered_df = df_results[df_results['Gesamtscore'] >= min_score].sort_values(by="Gesamtscore", ascending=False)
+
+        st.subheader("🏆 Screener Ergebnisse")
+        
+        # Formatierte Anzeige-Tabelle
+        display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Fwd)', 'PEG']
+        
+        st.dataframe(
+            filtered_df[display_columns],
+            column_config={
+                "Gesamtscore": st.column_config.ProgressColumn("Gesamtscore", min_value=0, max_value=100, format="%.1f"),
+                "Valuation": st.column_config.NumberColumn(format="%.1f"),
+                "Quality": st.column_config.NumberColumn(format="%.1f"),
+                "Risk": st.column_config.NumberColumn(format="%.1f"),
+                "Tech": st.column_config.NumberColumn(format="%.1f"),
+                "KGV (Fwd)": st.column_config.NumberColumn(format="%.2f"),
+                "PEG": st.column_config.NumberColumn(format="%.2f"),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+
+        st.markdown("---")
+        st.subheader("🔍 Einzelwert-Analyse")
+        
+        selected_ticker = st.selectbox("Wähle eine Aktie für das Radar-Profil:", filtered_df['Ticker'].tolist())
+        
+        if selected_ticker:
+            stock_data = filtered_df[filtered_df['Ticker'] == selected_ticker].iloc[0]
+            sub = stock_data['sub_scores']
+
+            col1, col2 = st.columns([1, 1])
+
+            with col1:
+                st.markdown(f"### **{stock_data['Name']} ({stock_data['Ticker']})**")
+                st.write(f"**Sektor:** {stock_data['Sektor']}")
+                st.write(f"**Aktueller Kurs:** {stock_data['Kurs']:.2f} $")
+                
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Gesamtscore", f"{stock_data['Gesamtscore']} / 100")
+                m2.metric("KGV (Fwd)", f"{stock_data['KGV (Fwd)']:.2f}" if pd.notna(stock_data['KGV (Fwd)']) else "N/A")
+                m3.metric("PEG", f"{stock_data['PEG']:.2f}" if pd.notna(stock_data['PEG']) else "N/A")
+
+            with col2:
+                # Radar Chart für Subscores
+                categories = ['Valuation', 'Quality', 'Risk', 'Momentum / Tech']
+                values = [sub['valuation'], sub['quality'], sub['risk'], sub['tech']]
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatterpolar(
+                    r=values,
+                    theta=categories,
+                    fill='toself',
+                    name=stock_data['Ticker']
+                ))
+
+                fig.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                    showlegend=False,
+                    margin=dict(l=40, r=40, t=40, b=40),
+                    height=300
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
