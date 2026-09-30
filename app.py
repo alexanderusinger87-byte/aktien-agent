@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import streamlit as st
+import yfinance as yf
 
 
 # ============================================================
@@ -8,22 +9,102 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V6.1",
+    page_title="Aktien-Screener V7",
     page_icon="📈",
     layout="wide",
 )
 
-st.title("📈 Aktien-Screener V6.1 – Multi-Faktor Ranking & Buy-Ratings")
+st.title("📈 Aktien-Screener V7 – Live Multi-Faktor Ranking")
+
+
+# ============================================================
+# TICKER-MAPPING
+# ============================================================
+# Einige europäische Aktien werden bei Yahoo Finance mit
+# Börsenplatz-Suffix geführt.
+#
+# Der Benutzer kann trotzdem die gewohnten Kürzel eingeben.
+
+TICKER_MAP = {
+    "SAP": "SAP.DE",
+    "SIE": "SIE.DE",
+    "MC": "MC.PA",
+    "OR": "OR.PA",
+    "AIR": "AIR.PA",
+    "SCHN": "SU.PA",
+    "SU": "SU.PA",
+    "SAN": "SAN.PA",
+    "TTE": "TTE.PA",
+    "SSUN.F": "SSUN.F",
+    "3CP.F": "3CP.F",
+    "IRE.MI": "IRE.MI",
+    "SMTOF": "SMTOF",
+    "BYDDY": "BYDDY",
+}
 
 
 # ============================================================
 # HILFSFUNKTIONEN
 # ============================================================
 
+def clean_number(value):
+    """Konvertiert einen Wert sicher in float."""
+    try:
+        if value is None:
+            return np.nan
+
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return np.nan
+            value = value[0]
+
+        return float(value)
+
+    except (ValueError, TypeError):
+        return np.nan
+
+
+def first_valid(*values):
+    """Gibt den ersten gültigen numerischen Wert zurück."""
+    for value in values:
+        number = clean_number(value)
+
+        if pd.notna(number):
+            return number
+
+    return np.nan
+
+
+def get_info_value(info, *keys):
+    """Sucht den ersten vorhandenen Wert aus mehreren Yahoo-Feldern."""
+    for key in keys:
+        if key in info:
+            value = clean_number(info.get(key))
+
+            if pd.notna(value):
+                return value
+
+    return np.nan
+
+
+def safe_divide(a, b):
+    """Division ohne Fehler bei 0/NaN."""
+    try:
+        a = clean_number(a)
+        b = clean_number(b)
+
+        if pd.isna(a) or pd.isna(b) or b == 0:
+            return np.nan
+
+        return a / b
+
+    except Exception:
+        return np.nan
+
+
 def safe_ratio_score(value, excellent, good, weak, bad=0):
     """
-    Kontinuierlicher Score für Kennzahlen,
-    bei denen niedrigere Werte besser sind.
+    Score für Kennzahlen, bei denen niedrigere Werte besser sind.
     """
 
     value = pd.to_numeric(value, errors="coerce")
@@ -47,8 +128,7 @@ def safe_ratio_score(value, excellent, good, weak, bad=0):
 
 def growth_score(value, excellent, good, weak):
     """
-    Kontinuierlicher Score für Kennzahlen,
-    bei denen höhere Werte besser sind.
+    Score für Kennzahlen, bei denen höhere Werte besser sind.
     """
 
     value = pd.to_numeric(value, errors="coerce")
@@ -73,7 +153,669 @@ def growth_score(value, excellent, good, weak):
 
 
 # ============================================================
-# HAUPTALGORITHMUS V6.1
+# LIVE DATEN ABRUFEN
+# ============================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_stock_data(user_ticker):
+
+    yahoo_ticker = TICKER_MAP.get(
+        user_ticker.upper(),
+        user_ticker.upper(),
+    )
+
+    result = {
+        "symbol": user_ticker.upper(),
+        "yahoo_symbol": yahoo_ticker,
+        "name": user_ticker.upper(),
+        "data_quality": 0,
+        "error": "",
+    }
+
+    try:
+
+        ticker = yf.Ticker(yahoo_ticker)
+
+        # ----------------------------------------------------
+        # INFO
+        # ----------------------------------------------------
+
+        info = ticker.info
+
+        if not info:
+            result["error"] = "Keine Yahoo-Finance-Daten gefunden."
+            return result
+
+        result["name"] = (
+            info.get("longName")
+            or info.get("shortName")
+            or user_ticker.upper()
+        )
+
+        # ----------------------------------------------------
+        # KURS
+        # ----------------------------------------------------
+
+        current_price = first_valid(
+            info.get("currentPrice"),
+            info.get("regularMarketPrice"),
+            info.get("previousClose"),
+        )
+
+        result["current_price"] = current_price
+
+        # ----------------------------------------------------
+        # VALUATION
+        # ----------------------------------------------------
+
+        result["pe_ratio"] = first_valid(
+            info.get("forwardPE"),
+            info.get("trailingPE"),
+        )
+
+        result["peg_ratio"] = get_info_value(
+            info,
+            "pegRatio",
+        )
+
+        result["pfcf_ratio"] = get_info_value(
+            info,
+            "priceToFreeCashflow",
+            "priceToFreeCashFlows",
+        )
+
+        result["eps_forward"] = first_valid(
+            info.get("forwardEps"),
+            info.get("trailingEps"),
+        )
+
+        # ----------------------------------------------------
+        # ANALYSTEN-KURSZIEL
+        # ----------------------------------------------------
+
+        analyst_upside = np.nan
+
+        try:
+
+            targets = ticker.get_analyst_price_targets()
+
+            target = first_valid(
+                targets.get("mean"),
+                targets.get("median"),
+            )
+
+            if (
+                pd.notna(target)
+                and pd.notna(current_price)
+                and current_price > 0
+            ):
+                analyst_upside = (
+                    target / current_price
+                ) - 1
+
+        except Exception:
+            pass
+
+        result["analyst_upside"] = analyst_upside
+
+        # ----------------------------------------------------
+        # GROWTH
+        # ----------------------------------------------------
+
+        result["eps_growth_5y"] = np.nan
+
+        # Zuerst versuchen wir Yahoo's explizite
+        # 5-Jahres-Growth-Schätzung.
+        try:
+
+            growth_estimates = ticker.get_growth_estimates()
+
+            if (
+                growth_estimates is not None
+                and not growth_estimates.empty
+            ):
+
+                row_candidates = [
+                    "+5y",
+                    "5y",
+                    "+5Y",
+                    "5Y",
+                ]
+
+                for row_name in row_candidates:
+
+                    if row_name in growth_estimates.index:
+
+                        value = growth_estimates.loc[row_name]
+
+                        if isinstance(value, pd.Series):
+
+                            if "stock" in value.index:
+                                value = value["stock"]
+
+                            else:
+                                value = value.iloc[0]
+
+                        value = clean_number(value)
+
+                        if pd.notna(value):
+
+                            # Yahoo liefert hier normalerweise
+                            # Dezimalwerte, z.B. 0.15 = 15 %
+                            if abs(value) < 1:
+                                value *= 100
+
+                            result["eps_growth_5y"] = value
+                            break
+
+        except Exception:
+            pass
+
+        # Fallback auf Yahoo earningsGrowth
+        if pd.isna(result["eps_growth_5y"]):
+
+            fallback_growth = get_info_value(
+                info,
+                "earningsGrowth",
+            )
+
+            if pd.notna(fallback_growth):
+
+                if abs(fallback_growth) < 1:
+                    fallback_growth *= 100
+
+                result["eps_growth_5y"] = fallback_growth
+
+        # ----------------------------------------------------
+        # QUALITY
+        # ----------------------------------------------------
+
+        roe = get_info_value(
+            info,
+            "returnOnEquity",
+        )
+
+        result["roe"] = roe if pd.notna(roe) else np.nan
+
+        # ----------------------------------------------------
+        # HISTORISCHE FINANZDATEN
+        # ----------------------------------------------------
+
+        income = None
+        balance = None
+        cashflow = None
+
+        try:
+            income = ticker.income_stmt
+
+        except Exception:
+            pass
+
+        try:
+            balance = ticker.balance_sheet
+
+        except Exception:
+            pass
+
+        try:
+            cashflow = ticker.cashflow
+
+        except Exception:
+            pass
+
+        # ----------------------------------------------------
+        # REVENUE
+        # ----------------------------------------------------
+
+        revenue = np.nan
+
+        if (
+            income is not None
+            and not income.empty
+            and "Total Revenue" in income.index
+        ):
+
+            revenue_series = (
+                income.loc["Total Revenue"]
+                .dropna()
+                .sort_index()
+            )
+
+            if len(revenue_series) > 0:
+                revenue = clean_number(
+                    revenue_series.iloc[-1]
+                )
+
+            # 3-Jahres-Umsatzwachstum
+            if len(revenue_series) >= 4:
+
+                old_revenue = clean_number(
+                    revenue_series.iloc[-4]
+                )
+
+                new_revenue = clean_number(
+                    revenue_series.iloc[-1]
+                )
+
+                if (
+                    pd.notna(old_revenue)
+                    and pd.notna(new_revenue)
+                    and old_revenue > 0
+                ):
+
+                    result["revenue_growth_3y"] = (
+                        (
+                            new_revenue
+                            / old_revenue
+                        ) ** (1 / 3)
+                        - 1
+                    ) * 100
+
+                else:
+                    result["revenue_growth_3y"] = np.nan
+
+            else:
+
+                # Fallback
+                result["revenue_growth_3y"] = (
+                    get_info_value(
+                        info,
+                        "revenueGrowth",
+                    )
+                    * 100
+                    if pd.notna(
+                        get_info_value(
+                            info,
+                            "revenueGrowth",
+                        )
+                    )
+                    else np.nan
+                )
+
+        else:
+
+            revenue = get_info_value(
+                info,
+                "totalRevenue",
+            )
+
+            revenue_growth = get_info_value(
+                info,
+                "revenueGrowth",
+            )
+
+            result["revenue_growth_3y"] = (
+                revenue_growth * 100
+                if pd.notna(revenue_growth)
+                else np.nan
+            )
+
+        # ----------------------------------------------------
+        # FCF
+        # ----------------------------------------------------
+
+        fcf = get_info_value(
+            info,
+            "freeCashflow",
+        )
+
+        if pd.isna(fcf) and cashflow is not None:
+
+            try:
+
+                if "Free Cash Flow" in cashflow.index:
+
+                    fcf_series = (
+                        cashflow.loc[
+                            "Free Cash Flow"
+                        ]
+                        .dropna()
+                    )
+
+                    if len(fcf_series) > 0:
+                        fcf = clean_number(
+                            fcf_series.iloc[0]
+                        )
+
+            except Exception:
+                pass
+
+        result["fcf_margin"] = safe_divide(
+            fcf,
+            revenue,
+        )
+
+        # ----------------------------------------------------
+        # FCF GROWTH
+        # ----------------------------------------------------
+
+        result["fcf_growth_3y"] = np.nan
+
+        if (
+            cashflow is not None
+            and not cashflow.empty
+            and "Free Cash Flow" in cashflow.index
+        ):
+
+            try:
+
+                fcf_series = (
+                    cashflow.loc[
+                        "Free Cash Flow"
+                    ]
+                    .dropna()
+                    .sort_index()
+                )
+
+                if len(fcf_series) >= 4:
+
+                    old_fcf = clean_number(
+                        fcf_series.iloc[-4]
+                    )
+
+                    new_fcf = clean_number(
+                        fcf_series.iloc[-1]
+                    )
+
+                    if (
+                        pd.notna(old_fcf)
+                        and pd.notna(new_fcf)
+                        and old_fcf > 0
+                        and new_fcf > 0
+                    ):
+
+                        result["fcf_growth_3y"] = (
+                            (
+                                new_fcf
+                                / old_fcf
+                            ) ** (1 / 3)
+                            - 1
+                        ) * 100
+
+            except Exception:
+                pass
+
+        # ----------------------------------------------------
+        # DEBT / CASH
+        # ----------------------------------------------------
+
+        total_debt = get_info_value(
+            info,
+            "totalDebt",
+        )
+
+        cash = get_info_value(
+            info,
+            "totalCash",
+            "cash",
+        )
+
+        ebitda = get_info_value(
+            info,
+            "ebitda",
+        )
+
+        if pd.isna(ebitda):
+
+            ebitda = get_info_value(
+                info,
+                "normalizedEBITDA",
+            )
+
+        net_debt = np.nan
+
+        if (
+            pd.notna(total_debt)
+            and pd.notna(cash)
+        ):
+            net_debt = total_debt - cash
+
+        if (
+            pd.notna(net_debt)
+            and pd.notna(ebitda)
+            and ebitda > 0
+        ):
+
+            result["net_debt_ebitda"] = (
+                net_debt / ebitda
+            )
+
+        else:
+
+            result["net_debt_ebitda"] = np.nan
+
+        # ----------------------------------------------------
+        # INTEREST COVERAGE
+        # ----------------------------------------------------
+
+        result["interest_coverage"] = np.nan
+
+        if (
+            income is not None
+            and not income.empty
+        ):
+
+            try:
+
+                ebit = np.nan
+                interest_expense = np.nan
+
+                for field in [
+                    "EBIT",
+                    "Operating Income",
+                ]:
+
+                    if field in income.index:
+
+                        ebit = clean_number(
+                            income.loc[field]
+                            .dropna()
+                            .iloc[0]
+                        )
+
+                        break
+
+                for field in [
+                    "Interest Expense",
+                    "Interest Expense Non Operating",
+                ]:
+
+                    if field in income.index:
+
+                        interest_expense = abs(
+                            clean_number(
+                                income.loc[field]
+                                .dropna()
+                                .iloc[0]
+                            )
+                        )
+
+                        break
+
+                if (
+                    pd.notna(ebit)
+                    and pd.notna(interest_expense)
+                    and interest_expense > 0
+                ):
+
+                    result["interest_coverage"] = (
+                        ebit / interest_expense
+                    )
+
+            except Exception:
+                pass
+
+        # ----------------------------------------------------
+        # BETA
+        # ----------------------------------------------------
+
+        result["beta"] = get_info_value(
+            info,
+            "beta",
+        )
+
+        # ----------------------------------------------------
+        # 52-WEEK-HIGH
+        # ----------------------------------------------------
+
+        fifty_two_week_high = get_info_value(
+            info,
+            "fiftyTwoWeekHigh",
+        )
+
+        if (
+            pd.notna(current_price)
+            and pd.notna(fifty_two_week_high)
+            and fifty_two_week_high > 0
+        ):
+
+            result["dist_52w_high"] = (
+                current_price
+                / fifty_two_week_high
+                - 1
+            )
+
+        else:
+
+            result["dist_52w_high"] = np.nan
+
+        # ----------------------------------------------------
+        # HISTORISCHE KURSDATEN
+        # ----------------------------------------------------
+
+        history = pd.DataFrame()
+
+        try:
+
+            history = ticker.history(
+                period="1y",
+                interval="1d",
+                auto_adjust=False,
+            )
+
+        except Exception:
+            pass
+
+        if (
+            history is not None
+            and not history.empty
+            and "Close" in history.columns
+        ):
+
+            close = (
+                history["Close"]
+                .dropna()
+            )
+
+            # SMA 200
+            if len(close) >= 200:
+
+                result["sma_200"] = clean_number(
+                    close.tail(200).mean()
+                )
+
+            else:
+
+                result["sma_200"] = np.nan
+
+            # 6-Monats-Performance
+            if len(close) >= 120:
+
+                price_6m_ago = clean_number(
+                    close.iloc[-120]
+                )
+
+                price_now = clean_number(
+                    close.iloc[-1]
+                )
+
+                if (
+                    pd.notna(price_6m_ago)
+                    and pd.notna(price_now)
+                    and price_6m_ago > 0
+                ):
+
+                    result["performance_6m"] = (
+                        price_now
+                        / price_6m_ago
+                        - 1
+                    )
+
+                else:
+
+                    result["performance_6m"] = np.nan
+
+            else:
+
+                result["performance_6m"] = np.nan
+
+        else:
+
+            result["sma_200"] = np.nan
+            result["performance_6m"] = np.nan
+
+        # ----------------------------------------------------
+        # DATA QUALITY
+        # ----------------------------------------------------
+
+        required = [
+            "current_price",
+            "pe_ratio",
+            "peg_ratio",
+            "pfcf_ratio",
+            "eps_forward",
+            "eps_growth_5y",
+            "roe",
+            "fcf_margin",
+            "beta",
+            "net_debt_ebitda",
+            "interest_coverage",
+            "revenue_growth_3y",
+            "dist_52w_high",
+            "sma_200",
+        ]
+
+        valid_count = sum(
+            pd.notna(result.get(col, np.nan))
+            for col in required
+        )
+
+        result["data_quality"] = round(
+            valid_count
+            / len(required)
+            * 100
+        )
+
+        return result
+
+    except Exception as e:
+
+        result["error"] = str(e)
+        result["data_quality"] = 0
+
+        return result
+
+
+# ============================================================
+# ALLE TICKER ABFRAGEN
+# ============================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_stocks(tickers):
+
+    rows = []
+
+    for ticker in tickers:
+
+        data = fetch_stock_data(ticker)
+
+        rows.append(data)
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# SCORE-ALGORITHMUS V6
 # ============================================================
 
 def calculate_stock_score_v6(df_input):
@@ -81,10 +823,9 @@ def calculate_stock_score_v6(df_input):
     df = df_input.copy()
 
     # ========================================================
-    # 1. VALUATION & MARGIN OF SAFETY – 25 %
+    # 1. VALUATION – 25 %
     # ========================================================
 
-    # Forward P/E
     pe_score = safe_ratio_score(
         df["pe_ratio"],
         excellent=12,
@@ -93,7 +834,6 @@ def calculate_stock_score_v6(df_input):
         bad=15,
     )
 
-    # PEG
     peg_score = safe_ratio_score(
         df["peg_ratio"],
         excellent=1.0,
@@ -102,7 +842,6 @@ def calculate_stock_score_v6(df_input):
         bad=15,
     )
 
-    # P/FCF
     pfcf_score = safe_ratio_score(
         df["pfcf_ratio"],
         excellent=15,
@@ -111,7 +850,6 @@ def calculate_stock_score_v6(df_input):
         bad=15,
     )
 
-    # FCF Yield
     df["fcf_yield"] = np.where(
         df["pfcf_ratio"] > 0,
         1 / df["pfcf_ratio"],
@@ -125,15 +863,6 @@ def calculate_stock_score_v6(df_input):
         weak=2,
     )
 
-    # --------------------------------------------------------
-    # Lynch Growth Value
-    # --------------------------------------------------------
-    # EPS Forward × erwartetes EPS-Wachstum
-    #
-    # Bewusst NICHT als echter Fair Value bezeichnet.
-    # Es handelt sich um eine Lynch/PEG-artige Heuristik.
-    # --------------------------------------------------------
-
     growth_for_value = np.clip(
         pd.to_numeric(
             df["eps_growth_5y"],
@@ -144,7 +873,8 @@ def calculate_stock_score_v6(df_input):
     )
 
     df["lynch_growth_value"] = (
-        df["eps_forward"] * growth_for_value
+        df["eps_forward"]
+        * growth_for_value
     ).round(2)
 
     df["margin_of_safety"] = np.where(
@@ -173,32 +903,22 @@ def calculate_stock_score_v6(df_input):
         default=10,
     )
 
-    # Analysten-Konsenspotenzial
-    if "analyst_upside" in df.columns:
+    analyst_score = np.select(
+        [
+            df["analyst_upside"] >= 0.30,
+            df["analyst_upside"] >= 0.15,
+            df["analyst_upside"] >= 0,
+            df["analyst_upside"] >= -0.15,
+        ],
+        [
+            100,
+            80,
+            60,
+            35,
+        ],
+        default=15,
+    )
 
-        analyst_score = np.select(
-            [
-                df["analyst_upside"] >= 0.30,
-                df["analyst_upside"] >= 0.15,
-                df["analyst_upside"] >= 0,
-                df["analyst_upside"] >= -0.15,
-            ],
-            [
-                100,
-                80,
-                60,
-                35,
-            ],
-            default=15,
-        )
-
-    else:
-        analyst_score = np.full(
-            len(df),
-            50.0,
-        )
-
-    # Valuation Gesamt
     df["score_valuation"] = (
         pe_score * 0.20
         + peg_score * 0.20
@@ -209,7 +929,7 @@ def calculate_stock_score_v6(df_input):
     )
 
     # ========================================================
-    # 2. QUALITY & CAPITAL ALLOCATION – 30 %
+    # 2. QUALITY – 30 %
     # ========================================================
 
     roe_score = growth_score(
@@ -240,18 +960,12 @@ def calculate_stock_score_v6(df_input):
         weak=3,
     )
 
-    if "fcf_growth_3y" in df.columns:
-
-        fcf_growth_quality = growth_score(
-            df["fcf_growth_3y"],
-            excellent=15,
-            good=8,
-            weak=3,
-        )
-
-    else:
-
-        fcf_growth_quality = revenue_growth_quality
+    fcf_growth_quality = growth_score(
+        df["fcf_growth_3y"],
+        excellent=15,
+        good=8,
+        weak=3,
+    )
 
     df["score_quality"] = (
         roic_score * 0.30
@@ -262,10 +976,9 @@ def calculate_stock_score_v6(df_input):
     )
 
     # ========================================================
-    # 3. RISK & SOLVENCY – 15 %
+    # 3. RISK – 15 %
     # ========================================================
 
-    # Net Debt / EBITDA
     debt_score = np.select(
         [
             df["net_debt_ebitda"] <= 0,
@@ -282,7 +995,6 @@ def calculate_stock_score_v6(df_input):
         default=10,
     )
 
-    # Interest Coverage
     interest_coverage_score = np.select(
         [
             df["interest_coverage"] >= 12,
@@ -299,7 +1011,6 @@ def calculate_stock_score_v6(df_input):
         default=15,
     )
 
-    # Beta bewusst geringer gewichtet
     beta_score = np.select(
         [
             df["beta"] <= 0.8,
@@ -317,21 +1028,20 @@ def calculate_stock_score_v6(df_input):
     )
 
     # FCF / Debt
-    if "fcf_to_debt" in df.columns:
+    # Wird aus FCF und Net Debt berechnet.
+    fcf_debt = np.where(
+        df["net_debt_ebitda"] > 0,
+        df["fcf_margin"]
+        / df["net_debt_ebitda"],
+        1.0,
+    )
 
-        fcf_debt_score = growth_score(
-            df["fcf_to_debt"] * 100,
-            excellent=50,
-            good=30,
-            weak=10,
-        )
-
-    else:
-
-        fcf_debt_score = np.full(
-            len(df),
-            50.0,
-        )
+    fcf_debt_score = growth_score(
+        fcf_debt * 100,
+        excellent=50,
+        good=30,
+        weak=10,
+    )
 
     df["score_risk"] = (
         debt_score * 0.40
@@ -358,18 +1068,12 @@ def calculate_stock_score_v6(df_input):
         weak=3,
     )
 
-    if "fcf_growth_3y" in df.columns:
-
-        fcf_growth_score = growth_score(
-            df["fcf_growth_3y"],
-            excellent=15,
-            good=8,
-            weak=3,
-        )
-
-    else:
-
-        fcf_growth_score = revenue_growth_score
+    fcf_growth_score = growth_score(
+        df["fcf_growth_3y"],
+        excellent=15,
+        good=8,
+        weak=3,
+    )
 
     df["score_growth"] = (
         eps_growth_score * 0.45
@@ -381,7 +1085,6 @@ def calculate_stock_score_v6(df_input):
     # 5. DIP & TECHNICALS – 15 %
     # ========================================================
 
-    # Abstand 52-Wochen-Hoch
     dip_score = np.select(
         [
             df["dist_52w_high"] <= -0.30,
@@ -398,7 +1101,6 @@ def calculate_stock_score_v6(df_input):
         default=20,
     )
 
-    # Abstand zur 200-Tage-Linie
     ma200_distance = (
         df["current_price"]
         / df["sma_200"]
@@ -423,31 +1125,21 @@ def calculate_stock_score_v6(df_input):
         default=15,
     )
 
-    # 6-Monats-Performance
-    if "performance_6m" in df.columns:
-
-        performance_6m_score = np.select(
-            [
-                df["performance_6m"] <= -0.20,
-                df["performance_6m"] <= -0.10,
-                df["performance_6m"] <= 0,
-                df["performance_6m"] <= 0.20,
-            ],
-            [
-                100,
-                80,
-                60,
-                35,
-            ],
-            default=20,
-        )
-
-    else:
-
-        performance_6m_score = np.full(
-            len(df),
-            60.0,
-        )
+    performance_6m_score = np.select(
+        [
+            df["performance_6m"] <= -0.20,
+            df["performance_6m"] <= -0.10,
+            df["performance_6m"] <= 0,
+            df["performance_6m"] <= 0.20,
+        ],
+        [
+            100,
+            80,
+            60,
+            35,
+        ],
+        default=20,
+    )
 
     df["score_dip_technicals"] = (
         dip_score * 0.40
@@ -456,7 +1148,7 @@ def calculate_stock_score_v6(df_input):
     )
 
     # ========================================================
-    # TOTAL SCORE
+    # TOTAL
     # ========================================================
 
     df["total_score_v6"] = (
@@ -466,46 +1158,6 @@ def calculate_stock_score_v6(df_input):
         + df["score_growth"] * 0.15
         + df["score_dip_technicals"] * 0.15
     ).round(1)
-
-    # ========================================================
-    # DATENQUALITÄT
-    # ========================================================
-
-    required_columns = [
-        "pe_ratio",
-        "peg_ratio",
-        "pfcf_ratio",
-        "eps_forward",
-        "eps_growth_5y",
-        "roe",
-        "roic",
-        "fcf_margin",
-        "beta",
-        "net_debt_ebitda",
-        "interest_coverage",
-        "revenue_growth_3y",
-        "dist_52w_high",
-        "sma_200",
-    ]
-
-    available_columns = [
-        col
-        for col in required_columns
-        if col in df.columns
-    ]
-
-    df["data_quality"] = (
-        df[available_columns]
-        .notna()
-        .mean(axis=1)
-        * 100
-    ).round(0)
-
-    df["data_warning"] = np.where(
-        df["data_quality"] < 90,
-        "⚠️ Daten unvollständig",
-        "✅ OK",
-    )
 
     # ========================================================
     # RATING
@@ -524,10 +1176,6 @@ def calculate_stock_score_v6(df_input):
         ],
         default="🔴 Verkaufen / Meiden",
     )
-
-    # ========================================================
-    # STERNE
-    # ========================================================
 
     df["stars"] = np.select(
         [
@@ -558,174 +1206,115 @@ def calculate_stock_score_v6(df_input):
 st.subheader("📌 Aktien auswählen")
 
 ticker_input = st.text_input(
-    "Ticker eingeben (mehrere mit Komma trennen)",
-    value="MSFT, GOOGL, NVDA, KO",
-    placeholder="z. B. MSFT, GOOGL, NVDA, AMD, MU, TSM",
+    "Ticker eingeben – mehrere mit Komma trennen",
+    value=(
+        "MSFT, GOOGL, NVDA, MU, SSUN.F, TSM, ASML, "
+        "VRT, VST, PEP, NVO, PFE, AMZN, MRVL, NKE, "
+        "BYDDY, NOK, AAPL, AVGO, META, TSLA, MC, SAP, "
+        "SIE, TTE, SAN, SCHN, SU, OR, AIR"
+    ),
+    placeholder="z. B. NVDA, MU, AMD, TSM, ASML",
 )
 
-# Eingabe bereinigen
 tickers = [
     ticker.strip().upper()
     for ticker in ticker_input.split(",")
     if ticker.strip()
 ]
 
-# Duplikate entfernen
 tickers = list(dict.fromkeys(tickers))
-
-if not tickers:
-
-    st.warning(
-        "Bitte mindestens einen Ticker eingeben."
-    )
-
-    st.stop()
 
 st.caption(
     f"{len(tickers)} Aktien ausgewählt: "
-    f"{', '.join(tickers)}"
+    + ", ".join(tickers)
 )
 
 
 # ============================================================
-# DEMO-DATEN
+# DATEN LADEN BUTTON
 # ============================================================
 
-def get_demo_data():
+load_button = st.button(
+    "🔄 Live-Daten abrufen & Ranking berechnen",
+    type="primary",
+    use_container_width=True,
+)
 
-    return pd.DataFrame([
 
-        {
-            "symbol": "MSFT",
-            "name": "Microsoft Corp.",
-            "current_price": 420.0,
-            "pe_ratio": 32.5,
-            "peg_ratio": 1.8,
-            "pfcf_ratio": 28.0,
-            "eps_forward": 13.5,
-            "eps_growth_5y": 14.5,
-            "roe": 0.38,
-            "roic": 0.26,
-            "fcf_margin": 0.30,
-            "beta": 0.90,
-            "net_debt_ebitda": 0.3,
-            "interest_coverage": 40.0,
-            "revenue_growth_3y": 12.5,
-            "dist_52w_high": -0.06,
-            "sma_200": 410.0,
-            "analyst_upside": 0.12,
-            "fcf_growth_3y": 15.0,
-            "fcf_to_debt": 1.2,
-            "performance_6m": 0.08,
-        },
+# Automatisch beim ersten Start laden
+if "data_loaded" not in st.session_state:
+    st.session_state["data_loaded"] = False
 
-        {
-            "symbol": "GOOGL",
-            "name": "Alphabet Inc.",
-            "current_price": 165.0,
-            "pe_ratio": 21.0,
-            "peg_ratio": 1.1,
-            "pfcf_ratio": 19.5,
-            "eps_forward": 7.8,
-            "eps_growth_5y": 16.0,
-            "roe": 0.29,
-            "roic": 0.22,
-            "fcf_margin": 0.22,
-            "beta": 1.05,
-            "net_debt_ebitda": -0.5,
-            "interest_coverage": 100.0,
-            "revenue_growth_3y": 11.0,
-            "dist_52w_high": -0.12,
-            "sma_200": 160.0,
-            "analyst_upside": 0.18,
-            "fcf_growth_3y": 14.0,
-            "fcf_to_debt": 1.5,
-            "performance_6m": 0.05,
-        },
 
-        {
-            "symbol": "NVDA",
-            "name": "NVIDIA Corp.",
-            "current_price": 120.0,
-            "pe_ratio": 42.0,
-            "peg_ratio": 1.2,
-            "pfcf_ratio": 38.0,
-            "eps_forward": 3.8,
-            "eps_growth_5y": 35.0,
-            "roe": 0.52,
-            "roic": 0.45,
-            "fcf_margin": 0.40,
-            "beta": 1.65,
-            "net_debt_ebitda": -0.2,
-            "interest_coverage": 60.0,
-            "revenue_growth_3y": 55.0,
-            "dist_52w_high": -0.18,
-            "sma_200": 115.0,
-            "analyst_upside": 0.22,
-            "fcf_growth_3y": 40.0,
-            "fcf_to_debt": 2.0,
-            "performance_6m": 0.15,
-        },
+if load_button:
+    st.session_state["data_loaded"] = True
 
-        {
-            "symbol": "KO",
-            "name": "Coca-Cola Co.",
-            "current_price": 68.0,
-            "pe_ratio": 24.0,
-            "peg_ratio": 2.8,
-            "pfcf_ratio": 22.0,
-            "eps_forward": 2.85,
-            "eps_growth_5y": 6.0,
-            "roe": 0.40,
-            "roic": 0.16,
-            "fcf_margin": 0.21,
-            "beta": 0.58,
-            "net_debt_ebitda": 1.8,
-            "interest_coverage": 12.0,
-            "revenue_growth_3y": 5.0,
-            "dist_52w_high": -0.02,
-            "sma_200": 64.0,
-            "analyst_upside": 0.05,
-            "fcf_growth_3y": 5.0,
-            "fcf_to_debt": 0.35,
-            "performance_6m": 0.02,
-        },
-    ])
+
+if not st.session_state["data_loaded"]:
+
+    st.info(
+        "Ticker eingeben und anschließend "
+        "„Live-Daten abrufen & Ranking berechnen“ klicken."
+    )
+
+    st.stop()
 
 
 # ============================================================
-# DATEN LADEN
+# LIVE-DATEN LADEN
 # ============================================================
 
-df_all = get_demo_data()
+with st.spinner(
+    f"Live-Daten für {len(tickers)} Aktien werden abgerufen ..."
+):
 
-# Nur eingegebene Aktien auswählen
-df_raw = df_all[
-    df_all["symbol"].isin(tickers)
-].copy()
+    df_live = load_stocks(tuple(tickers))
 
-# Fehlende Ticker melden
-found_tickers = set(df_raw["symbol"])
 
-missing_tickers = [
-    ticker
-    for ticker in tickers
-    if ticker not in found_tickers
+# ============================================================
+# FEHLER / DATENQUALITÄT
+# ============================================================
+
+error_rows = df_live[
+    df_live["error"].fillna("") != ""
 ]
 
-if missing_tickers:
+if not error_rows.empty:
 
     st.warning(
-        "Für folgende Ticker sind aktuell noch "
-        "keine Daten hinterlegt: "
-        + ", ".join(missing_tickers)
+        "Bei einigen Ticker konnten Daten nicht vollständig "
+        "abgerufen werden."
     )
+
+    error_table = error_rows[
+        [
+            "symbol",
+            "yahoo_symbol",
+            "error",
+        ]
+    ].copy()
+
+    st.dataframe(
+        error_table,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+# ============================================================
+# GÜLTIGE DATEN
+# ============================================================
+
+df_raw = df_live[
+    df_live["data_quality"] > 20
+].copy()
+
 
 if df_raw.empty:
 
     st.error(
-        "Für keinen der eingegebenen Ticker "
-        "sind aktuell Daten vorhanden."
+        "Es konnten keine verwertbaren Live-Daten "
+        "abgerufen werden."
     )
 
     st.stop()
@@ -735,7 +1324,9 @@ if df_raw.empty:
 # SCORE BERECHNEN
 # ============================================================
 
-df_results = calculate_stock_score_v6(df_raw)
+df_results = calculate_stock_score_v6(
+    df_raw
+)
 
 
 # ============================================================
@@ -752,22 +1343,22 @@ col1, col2, col3, col4 = st.columns(4)
 
 col1.metric(
     "Top-Pick",
-    f"{top['name']} ({top['symbol']})"
+    f"{top['name']} ({top['symbol']})",
 )
 
 col2.metric(
     "Gesamtwertung",
-    f"{top['total_score_v6']} / 100"
+    f"{top['total_score_v6']} / 100",
 )
 
 col3.metric(
     "Sterne-Rating",
-    top["stars"]
+    top["stars"],
 )
 
 col4.metric(
     "Kaufempfehlung",
-    top["rating"]
+    top["rating"],
 )
 
 
@@ -779,46 +1370,54 @@ st.markdown("---")
 
 st.subheader("📊 Aktien-Ranking & Übersicht")
 
+display_columns = [
+    "symbol",
+    "name",
+    "stars",
+    "rating",
+    "total_score_v6",
+    "score_valuation",
+    "score_quality",
+    "score_risk",
+    "score_growth",
+    "score_dip_technicals",
+    "current_price",
+    "lynch_growth_value",
+    "margin_of_safety",
+    "analyst_upside",
+    "data_quality",
+]
+
+display_columns = [
+    col
+    for col in display_columns
+    if col in df_results.columns
+]
+
+
 st.dataframe(
-    df_results[
-        [
-            "symbol",
-            "name",
-            "stars",
-            "rating",
-            "total_score_v6",
-            "score_valuation",
-            "score_quality",
-            "score_risk",
-            "score_growth",
-            "score_dip_technicals",
-            "current_price",
-            "lynch_growth_value",
-            "margin_of_safety",
-            "data_warning",
-        ]
-    ],
+    df_results[display_columns],
 
     column_config={
 
         "symbol":
             st.column_config.TextColumn(
-                "Ticker"
+                "Ticker",
             ),
 
         "name":
             st.column_config.TextColumn(
-                "Unternehmen"
+                "Unternehmen",
             ),
 
         "stars":
             st.column_config.TextColumn(
-                "Sterne"
+                "Sterne",
             ),
 
         "rating":
             st.column_config.TextColumn(
-                "Kaufempfehlung / Ampel"
+                "Kaufempfehlung / Ampel",
             ),
 
         "total_score_v6":
@@ -861,14 +1460,14 @@ st.dataframe(
 
         "current_price":
             st.column_config.NumberColumn(
-                "Kurs",
-                format="$%.2f",
+                "Kurs Live",
+                format="%.2f",
             ),
 
         "lynch_growth_value":
             st.column_config.NumberColumn(
                 "Lynch Growth Value",
-                format="$%.2f",
+                format="%.2f",
             ),
 
         "margin_of_safety":
@@ -877,9 +1476,18 @@ st.dataframe(
                 format="%.1%",
             ),
 
-        "data_warning":
-            st.column_config.TextColumn(
-                "Datenqualität"
+        "analyst_upside":
+            st.column_config.NumberColumn(
+                "Analystenpotenzial",
+                format="%.1%",
+            ),
+
+        "data_quality":
+            st.column_config.ProgressColumn(
+                "Datenqualität",
+                min_value=0,
+                max_value=100,
+                format="%.0f%%",
             ),
     },
 
@@ -908,7 +1516,7 @@ for _, row in df_results.iterrows():
         c1, c2 = st.columns(2)
 
         # ----------------------------------------------------
-        # LINKE SPALTE
+        # SUB-SCORES
         # ----------------------------------------------------
 
         with c1:
@@ -958,39 +1566,75 @@ for _, row in df_results.iterrows():
             )
 
         # ----------------------------------------------------
-        # RECHTE SPALTE
+        # FUNDAMENTALDATEN
         # ----------------------------------------------------
 
         with c2:
 
             st.write(
-                "**Bewertung & Fair Value:**"
+                "**Bewertung & Fundamentaldaten:**"
             )
 
             st.write(
                 f"- **Aktueller Kurs:** "
-                f"${row['current_price']:.2f}"
+                f"{row['current_price']:.2f}"
             )
 
-            st.write(
-                f"- **Lynch Growth Value:** "
-                f"${row['lynch_growth_value']:.2f}"
-            )
+            if pd.notna(row["lynch_growth_value"]):
 
-            st.write(
-                f"- **Margin of Safety:** "
-                f"{row['margin_of_safety']:.1%}"
-            )
+                st.write(
+                    f"- **Lynch Growth Value:** "
+                    f"{row['lynch_growth_value']:.2f}"
+                )
 
-            st.write(
-                f"- **Beta:** "
-                f"{row['beta']}"
-            )
+            if pd.notna(row["margin_of_safety"]):
 
-            st.write(
-                f"- **Net Debt / EBITDA:** "
-                f"{row['net_debt_ebitda']}"
-            )
+                st.write(
+                    f"- **Margin of Safety:** "
+                    f"{row['margin_of_safety']:.1%}"
+                )
+
+            if pd.notna(row["analyst_upside"]):
+
+                st.write(
+                    f"- **Analystenpotenzial:** "
+                    f"{row['analyst_upside']:.1%}"
+                )
+
+            if pd.notna(row["pe_ratio"]):
+
+                st.write(
+                    f"- **Forward P/E:** "
+                    f"{row['pe_ratio']:.1f}"
+                )
+
+            if pd.notna(row["peg_ratio"]):
+
+                st.write(
+                    f"- **PEG:** "
+                    f"{row['peg_ratio']:.2f}"
+                )
+
+            if pd.notna(row["pfcf_ratio"]):
+
+                st.write(
+                    f"- **P/FCF:** "
+                    f"{row['pfcf_ratio']:.1f}"
+                )
+
+            if pd.notna(row["beta"]):
+
+                st.write(
+                    f"- **Beta:** "
+                    f"{row['beta']:.2f}"
+                )
+
+            if pd.notna(row["net_debt_ebitda"]):
+
+                st.write(
+                    f"- **Net Debt / EBITDA:** "
+                    f"{row['net_debt_ebitda']:.2f}"
+                )
 
             st.write(
                 f"- **Datenqualität:** "
