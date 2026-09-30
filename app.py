@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V9.2 (mit Turnaround-Radar)",
+    page_title="Aktien-Screener V9.3 (Smart Turnaround Blend)",
     page_icon="📈",
     layout="wide"
 )
@@ -39,42 +39,61 @@ def clean_percentage(val):
         return val / 100.0
     return val
 
-def get_recommendation(score):
-    if score >= 75:
-        return "🟢 Starker Kauf"
-    elif score >= 60:
-        return "🟡 Kauf"
-    elif score >= 45:
-        return "🟠 Halten"
-    else:
-        return "🔴 Verkaufen"
-
 def get_turnaround_status(metrics):
-    """
-    Eigenständige Logik zur Erkennung von Turnaround-Situationen 
-    (unabhängig vom Qualitäts-Score).
-    """
-    dist_high = metrics.get('dist_52w_high', 0)  # z.B. -0.30 (30% unter Hoch)
-    perf_1m = metrics.get('perf_1m', 0)          # Kurzfristiger Trend (letzte 30 Tage)
-    pe = metrics.get('pe_forward', np.nan)       # Bewertung
+    dist_high = metrics.get('dist_52w_high', 0)
+    perf_1m = metrics.get('perf_1m', 0)
+    pe = metrics.get('pe_forward', np.nan)
 
-    # Bedingung 1: Aktie ist stark gefallen (> 20% unter 52W-Hoch)
     is_beaten_down = dist_high <= -0.20
-    
-    # Bedingung 2: Aktie zeigt Rebound-Anzeichen (letzter Monat dreht ins Plus oder stabilisiert sich)
     is_rebounding = perf_1m >= 0.02
-
-    # Bedingung 3: Keine extrem überteuerte Bewertung
     is_reasonably_priced = pd.isna(pe) or pe < 22
 
     if is_beaten_down and is_rebounding and is_reasonably_priced:
         return "🚀 Aktiver Turnaround"
     elif is_beaten_down and not is_rebounding:
-        return "⚠️ Fallendes Messer (Noch schwach)"
+        return "⚠️ Fallendes Messer"
     elif is_beaten_down and (-0.02 <= perf_1m < 0.02):
-        return "⏱️ Bodenbildung / Basis"
+        return "⏱️ Bodenbildung"
     else:
-        return "🛡️ Trend / Kein Turnaround"
+        return "🛡️ Trend / Normal"
+
+def get_combined_recommendation(score, turnaround_status):
+    """
+    Kombiniert den harten Quant-Score mit dem Turnaround-Status,
+    um Widersprüche (z.B. starker Score aber fallendes Messer) zu lösen.
+    """
+    if "Fallendes Messer" in turnaround_status:
+        if score >= 60:
+            return "🟠 Halten (Vorsicht: Fallendes Messer)"
+        else:
+            return "🔴 Verkaufen / Fallendes Messer"
+            
+    elif "Aktiver Turnaround" in turnaround_status:
+        if score >= 60:
+            return "🟢 Starker Turnaround-Kauf"
+        elif score >= 45:
+            return "🟡 Spekulativer Turnaround"
+        else:
+            return "🟠 Turnaround-Spekulation (Risiko)"
+            
+    elif "Bodenbildung" in turnaround_status:
+        if score >= 60:
+            return "🟢 Kauf (Bodenbildung)"
+        elif score >= 45:
+            return "🟡 Basisbildung abwarten"
+        else:
+            return "🟠 Halten"
+            
+    else:
+        # Standard Quant-Score Empfehlung
+        if score >= 75:
+            return "🟢 Starker Kauf"
+        elif score >= 60:
+            return "🟡 Kauf"
+        elif score >= 45:
+            return "🟠 Halten"
+        else:
+            return "🔴 Verkaufen"
 
 @st.cache_data(ttl=3600*12)
 def fetch_stock_data(ticker_symbol):
@@ -116,17 +135,14 @@ def calculate_advanced_metrics(data):
     current_price = close.iloc[-1]
     metrics['current_price'] = current_price
     
-    # 52-Wochen-Hoch Abstand
     max_52w = close.max()
     metrics['dist_52w_high'] = (current_price - max_52w) / max_52w if max_52w > 0 else 0
 
-    # 1-Monats-Performance (für Turnaround-Erkennung)
     cutoff_1m = datetime.now() - timedelta(days=30)
     hist_1m = close[close.index >= cutoff_1m.strftime('%Y-%m-%d')]
     price_1m_ago = hist_1m.iloc[0] if not hist_1m.empty else close.iloc[0]
     metrics['perf_1m'] = (current_price - price_1m_ago) / price_1m_ago
 
-    # 6-Monats-Performance & SMA200
     cutoff_6m = datetime.now() - timedelta(days=180)
     hist_6m = close[close.index >= cutoff_6m.strftime('%Y-%m-%d')]
     price_6m_ago = hist_6m.iloc[0] if not hist_6m.empty else close.iloc[0]
@@ -135,7 +151,6 @@ def calculate_advanced_metrics(data):
     metrics['sma_200'] = close.rolling(200).mean().iloc[-1]
     metrics['above_sma200'] = current_price > metrics['sma_200']
 
-    # Bewertung & Kennzahlen
     metrics['pe_forward'] = safe_get(info, 'forwardPE')
     metrics['peg_ratio'] = safe_get(info, 'pegRatio')
     metrics['pb_ratio'] = safe_get(info, 'priceToBook')
@@ -157,7 +172,6 @@ def calculate_advanced_metrics(data):
     metrics['roe'] = clean_percentage(safe_get(info, 'returnOnEquity'))
     metrics['gross_margin'] = safe_get(info, 'grossMargins')
 
-    # ROIC & Risiko (Nicht für Finanzwerte)
     if sector != 'Financial Services' and not fin.empty and not bs.empty:
         try:
             ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else fin.loc['Operating Income'].iloc[0]
@@ -205,7 +219,6 @@ def score_stock_v9(metrics):
     weights = SECTOR_WEIGHTS.get(sector, SECTOR_WEIGHTS['Default'])
     scores = {}
 
-    # 1. Valuation
     v_scores = []
     pe = metrics.get('pe_forward')
     if pd.notna(pe) and pe > 0:
@@ -215,7 +228,6 @@ def score_stock_v9(metrics):
         v_scores.append(np.interp(peg, [0.4, 0.9, 1.3, 2.2], [100, 90, 50, 0]))
     scores['valuation'] = np.mean(v_scores) if v_scores else 50.0
 
-    # 2. Quality
     q_scores = []
     if sector == 'Financial Services':
         roe = metrics.get('roe')
@@ -233,7 +245,6 @@ def score_stock_v9(metrics):
         q_scores.append(np.interp(fcf_y, [0.0, 0.03, 0.06, 0.10], [10, 50, 85, 100]))
     scores['quality'] = np.mean(q_scores) if q_scores else 50.0
 
-    # 3. Risk
     r_scores = []
     if sector == 'Financial Services':
         pb = metrics.get('pb_ratio')
@@ -248,7 +259,6 @@ def score_stock_v9(metrics):
             r_scores.append(np.interp(cr, [0.7, 1.1, 1.8, 3.0], [10, 60, 100, 80]))
     scores['risk'] = np.mean(r_scores) if r_scores else 50.0
 
-    # 4. Tech
     t_scores = [85 if metrics.get('above_sma200', False) else 25]
     perf_6m = metrics.get('perf_6m')
     if pd.notna(perf_6m):
@@ -268,8 +278,8 @@ def score_stock_v9(metrics):
 # ==============================================================================
 
 def main():
-    st.title("📊 Quant-Aktien-Screener V9.2")
-    st.caption("Sektor-adaptives Quant-Scoring + Unabhängiger Turnaround-Status")
+    st.title("📊 Quant-Aktien-Screener V9.3")
+    st.caption("Sektor-adaptives Quant-Scoring + Smart Turnaround Blend")
 
     st.sidebar.header("⚙️ Konfiguration")
     default_tickers = "BMW.DE, NVDA, MSFT, AAPL, GOOGL, AMZN, TTE.PA, ING, PFE, KO, NKE"
@@ -279,7 +289,7 @@ def main():
         height=100
     )
     
-    min_score = st.sidebar.slider("Mindest-Gesamtscore", 0, 100, 0) # Standard auf 0 damit BMW sichtbar ist
+    min_score = st.sidebar.slider("Mindest-Gesamtscore", 0, 100, 0)
 
     if st.sidebar.button("🔄 Live-Daten neu laden"):
         st.cache_data.clear()
@@ -296,6 +306,8 @@ def main():
             if data:
                 metrics = calculate_advanced_metrics(data)
                 total_score, sub_scores = score_stock_v9(metrics)
+                turnaround_status = metrics['turnaround_status']
+                combined_rec = get_combined_recommendation(total_score, turnaround_status)
                 
                 results.append({
                     'Ticker': symbol,
@@ -303,8 +315,8 @@ def main():
                     'Sektor': metrics['sector'],
                     'Kurs': metrics['current_price'],
                     'Gesamtscore': total_score,
-                    'Empfehlung': get_recommendation(total_score),
-                    'Turnaround Status': metrics['turnaround_status'],
+                    'Empfehlung': combined_rec,
+                    'Turnaround Status': turnaround_status,
                     'Valuation': round(sub_scores['valuation'], 1),
                     'Quality': round(sub_scores['quality'], 1),
                     'Risk': round(sub_scores['risk'], 1),
@@ -323,7 +335,7 @@ def main():
     if not df_results.empty:
         filtered_df = df_results[df_results['Gesamtscore'] >= min_score].sort_values(by="Gesamtscore", ascending=False)
 
-        st.subheader("🏆 Screener Ergebnisse & Turnaround-Radar")
+        st.subheader("🏆 Screener Ergebnisse & Smart Blend")
         
         display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Empfehlung', 'Turnaround Status', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Fwd)']
         
@@ -338,7 +350,7 @@ def main():
             styled_df,
             column_config={
                 "Gesamtscore": st.column_config.NumberColumn(format="%.1f"),
-                "Empfehlung": st.column_config.TextColumn("Kaufempfehlung"),
+                "Empfehlung": st.column_config.TextColumn("Kombinierte Empfehlung"),
                 "Turnaround Status": st.column_config.TextColumn("🔄 Turnaround Status"),
                 "Valuation": st.column_config.NumberColumn(format="%.1f"),
                 "Quality": st.column_config.NumberColumn(format="%.1f"),
@@ -365,7 +377,7 @@ def main():
                 st.markdown(f"### **{stock_data['Name']} ({stock_data['Ticker']})**")
                 st.write(f"**Sektor:** {stock_data['Sektor']}")
                 st.write(f"**Aktueller Kurs:** {stock_data['Kurs']:.2f}")
-                st.write(f"**Quant-Einstufung:** {stock_data['Empfehlung']}")
+                st.write(f"**Empfehlung:** {stock_data['Empfehlung']}")
                 st.write(f"**Turnaround Status:** {stock_data['Turnaround Status']}")
                 
                 m1, m2, m3 = st.columns(3)
