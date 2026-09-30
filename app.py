@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V9",
+    page_title="Aktien-Screener V9.1",
     page_icon="📈",
     layout="wide"
 )
@@ -27,6 +27,24 @@ SECTOR_WEIGHTS = {
         'quality': 0.40,
         'risk': 0.15,
         'tech': 0.25
+    },
+    'Healthcare': {
+        'valuation': 0.25,
+        'quality': 0.40,
+        'risk': 0.20,
+        'tech': 0.15
+    },
+    'Consumer Cyclical': {
+        'valuation': 0.30,
+        'quality': 0.30,
+        'risk': 0.20,
+        'tech': 0.20
+    },
+    'Consumer Defensive': {
+        'valuation': 0.25,
+        'quality': 0.40,
+        'risk': 0.25,
+        'tech': 0.10
     },
     'Default': {
         'valuation': 0.25,
@@ -87,7 +105,7 @@ def fetch_stock_data(ticker_symbol):
         return None
 
 # ==============================================================================
-# CORE FINANCIAL METRICS CALCULATOR (V9)
+# CORE FINANCIAL METRICS CALCULATOR (V9.1 - ROBUST & CLEAN)
 # ==============================================================================
 
 def calculate_advanced_metrics(data):
@@ -102,7 +120,7 @@ def calculate_advanced_metrics(data):
     metrics['sector'] = sector
     metrics['name'] = safe_get(info, 'shortName', safe_get(info, 'symbol'))
 
-    # 1. Preis & Momentum (Exakte 6M)
+    # 1. Preis & Momentum (Exakte 6M Performance & SMA200)
     close = hist['Close']
     current_price = close.iloc[-1]
     metrics['current_price'] = current_price
@@ -114,65 +132,64 @@ def calculate_advanced_metrics(data):
     metrics['perf_6m'] = (current_price - price_6m_ago) / price_6m_ago
     metrics['sma_200'] = close.rolling(200).mean().iloc[-1]
     metrics['above_sma200'] = current_price > metrics['sma_200']
-    metrics['dist_52w_high'] = (current_price - close.max()) / close.max()
 
     # 2. Bewertungskennzahlen
     metrics['pe_forward'] = safe_get(info, 'forwardPE')
     metrics['peg_ratio'] = safe_get(info, 'pegRatio')
     metrics['pb_ratio'] = safe_get(info, 'priceToBook')
     
-    fcf = safe_get(info, 'freeCashflow')
+    # Bereinigt: Free Cash Flow Yield Kaskade
+    fcf = np.nan
     market_cap = safe_get(info, 'marketCap')
-    if pd.isna(fcf) and not cf.empty:
+    if not cf.empty and 'Operating Cash Flow' in cf.index:
         try:
             op_cf = cf.loc['Operating Cash Flow'].iloc[0]
             capex = cf.loc['Capital Expenditure'].iloc[0] if 'Capital Expenditure' in cf.index else 0
-            fcf = op_cf + capex
+            fcf = op_cf + capex  # capex ist in yfinance i.d.R. negativ angegeben
         except Exception:
             fcf = np.nan
-            
-    metrics['fcf_yield'] = (fcf / market_cap) if (fcf and market_cap) else np.nan
+    if pd.isna(fcf):
+        fcf = safe_get(info, 'freeCashflow')
+        
+    metrics['fcf_yield'] = (fcf / market_cap) if (pd.notna(fcf) and pd.notna(market_cap) and market_cap > 0) else np.nan
 
     # 3. Qualität & Rentabilität
     metrics['roe'] = clean_percentage(safe_get(info, 'returnOnEquity'))
-    metrics['eps_growth_5y'] = clean_percentage(safe_get(info, 'earningsGrowth'))
-    metrics['payout_ratio'] = clean_percentage(safe_get(info, 'payoutRatio'))
+    metrics['gross_margin'] = safe_get(info, 'grossMargins')
 
-    try:
-        ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else fin.loc['Operating Income'].iloc[0]
-        inc_tax = fin.loc['Tax Provision'].iloc[0] if 'Tax Provision' in fin.index else 0
-        pre_tax = fin.loc['Pretax Income'].iloc[0] if 'Pretax Income' in fin.index else 1
-        
-        tax_rate = inc_tax / pre_tax if pre_tax > 0 else 0.21
-        tax_rate = max(0.15, min(tax_rate, 0.35))
-        
-        nopat = ebit * (1 - tax_rate)
-        
-        total_assets = bs.loc['Total Assets'].iloc[0]
-        curr_liab = bs.loc['Current Liabilities'].iloc[0] if 'Current Liabilities' in bs.index else 0
-        cash = bs.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in bs.index else 0
-        
-        invested_capital = total_assets - curr_liab - cash
-        metrics['roic'] = nopat / invested_capital if invested_capital > 0 else np.nan
-    except Exception:
+    # ROIC (nur für Nicht-Finanzwerte relevant)
+    if sector != 'Financial Services' and not fin.empty and not bs.empty:
+        try:
+            ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else fin.loc['Operating Income'].iloc[0]
+            inc_tax = fin.loc['Tax Provision'].iloc[0] if 'Tax Provision' in fin.index else 0
+            pre_tax = fin.loc['Pretax Income'].iloc[0] if 'Pretax Income' in fin.index else 1
+            
+            tax_rate = inc_tax / pre_tax if pre_tax > 0 else 0.21
+            tax_rate = max(0.15, min(tax_rate, 0.35))
+            nopat = ebit * (1 - tax_rate)
+            
+            total_assets = bs.loc['Total Assets'].iloc[0]
+            curr_liab = bs.loc['Current Liabilities'].iloc[0] if 'Current Liabilities' in bs.index else 0
+            cash = bs.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in bs.index else 0
+            
+            invested_capital = total_assets - curr_liab - cash
+            metrics['roic'] = nopat / invested_capital if invested_capital > 0 else np.nan
+        except Exception:
+            metrics['roic'] = np.nan
+    else:
         metrics['roic'] = np.nan
 
-    try:
-        gross_profit = fin.loc['Gross Profit'].iloc[0]
-        total_rev = fin.loc['Total Revenue'].iloc[0]
-        metrics['gross_margin'] = gross_profit / total_rev
-    except Exception:
-        metrics['gross_margin'] = safe_get(info, 'grossMargins')
-
-    # 4. Risikokennzahlen
-    try:
-        tot_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0
-        cash_eq = bs.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in bs.index else 0
-        net_debt = tot_debt - cash_eq
-        
-        ebitda = fin.loc['Normalized EBITDA'].iloc[0] if 'Normalized EBITDA' in fin.index else fin.loc['EBITDA'].iloc[0]
-        metrics['net_debt_ebitda'] = (net_debt / ebitda) if ebitda > 0 else 99.0
-    except Exception:
+    # 4. Risiko (nur für Nicht-Finanzwerte relevant)
+    if sector != 'Financial Services' and not fin.empty and not bs.empty:
+        try:
+            tot_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0
+            cash_eq = bs.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in bs.index else 0
+            net_debt = tot_debt - cash_eq
+            ebitda = fin.loc['Normalized EBITDA'].iloc[0] if 'Normalized EBITDA' in fin.index else fin.loc['EBITDA'].iloc[0]
+            metrics['net_debt_ebitda'] = (net_debt / ebitda) if ebitda > 0 else np.nan
+        except Exception:
+            metrics['net_debt_ebitda'] = np.nan
+    else:
         metrics['net_debt_ebitda'] = np.nan
 
     metrics['current_ratio'] = safe_get(info, 'currentRatio')
@@ -180,76 +197,80 @@ def calculate_advanced_metrics(data):
     return metrics
 
 # ==============================================================================
-# SCORING ENGINE (SECTOR-AWARE V9)
+# OPTIMIZED SCORING ENGINE (V9.1)
 # ==============================================================================
 
 def score_stock_v9(metrics):
     if not metrics:
-        return 0, {}
+        return 0, {'valuation': 0, 'quality': 0, 'risk': 0, 'tech': 0}
 
     sector = metrics.get('sector', 'Default')
     weights = SECTOR_WEIGHTS.get(sector, SECTOR_WEIGHTS['Default'])
 
     scores = {}
 
-    # 1. Valuation
+    # 1. VALUATION SCORE (Schutz vor Value Traps)
     v_scores = []
     pe = metrics.get('pe_forward')
     if pd.notna(pe) and pe > 0:
-        v_scores.append(np.interp(pe, [8, 15, 25, 40], [100, 80, 40, 0]))
+        # Sehr hohes KGV gestaffelt abwerten; extrem niedriges KGV (< 5) ebenfalls (Value-Trap-Risiko)
+        v_scores.append(np.interp(pe, [3, 8, 15, 28, 50], [30, 85, 100, 40, 0]))
         
     peg = metrics.get('peg_ratio')
     if pd.notna(peg) and peg > 0:
-        v_scores.append(np.interp(peg, [0.5, 1.0, 1.5, 2.5], [100, 85, 50, 0]))
+        v_scores.append(np.interp(peg, [0.4, 0.9, 1.3, 2.2], [100, 90, 50, 0]))
 
     scores['valuation'] = np.mean(v_scores) if v_scores else 50.0
 
-    # 2. Quality
+    # 2. QUALITY SCORE
     q_scores = []
-    roic = metrics.get('roic')
-    if pd.notna(roic):
-        q_scores.append(np.interp(roic, [0.05, 0.12, 0.20, 0.35], [20, 60, 90, 100]))
+    if sector == 'Financial Services':
+        roe = metrics.get('roe')
+        if pd.notna(roe):
+            q_scores.append(np.interp(roe, [0.05, 0.10, 0.16, 0.25], [20, 60, 90, 100]))
+    else:
+        roic = metrics.get('roic')
+        if pd.notna(roic):
+            q_scores.append(np.interp(roic, [0.05, 0.12, 0.20, 0.35], [20, 60, 90, 100]))
 
-    gm = metrics.get('gross_margin')
-    if pd.notna(gm):
-        q_scores.append(np.interp(gm, [0.15, 0.35, 0.55, 0.75], [20, 50, 80, 100]))
+        gm = metrics.get('gross_margin')
+        if pd.notna(gm):
+            q_scores.append(np.interp(gm, [0.15, 0.35, 0.55, 0.75], [20, 50, 80, 100]))
 
     fcf_y = metrics.get('fcf_yield')
     if pd.notna(fcf_y):
-        q_scores.append(np.interp(fcf_y, [0.01, 0.04, 0.07, 0.12], [20, 60, 90, 100]))
+        q_scores.append(np.interp(fcf_y, [0.0, 0.03, 0.06, 0.10], [10, 50, 85, 100]))
 
     scores['quality'] = np.mean(q_scores) if q_scores else 50.0
 
-    # 3. Risk
+    # 3. RISK SCORE
     r_scores = []
-    if sector != 'Financial Services':
+    if sector == 'Financial Services':
+        pb = metrics.get('pb_ratio')
+        if pd.notna(pb):
+            r_scores.append(np.interp(pb, [0.6, 1.0, 1.6, 2.5], [100, 85, 50, 0]))
+    else:
         nd_ebitda = metrics.get('net_debt_ebitda')
         if pd.notna(nd_ebitda):
-            r_scores.append(np.interp(nd_ebitda, [0.0, 1.5, 3.0, 5.0], [100, 80, 40, 0]))
+            r_scores.append(np.interp(nd_ebitda, [-1.0, 0.5, 2.0, 4.0], [100, 95, 60, 0]))
             
         cr = metrics.get('current_ratio')
         if pd.notna(cr):
-            r_scores.append(np.interp(cr, [0.8, 1.2, 2.0, 3.5], [20, 70, 100, 80]))
-    else:
-        pb = metrics.get('pb_ratio')
-        if pd.notna(pb):
-            r_scores.append(np.interp(pb, [0.7, 1.0, 1.5, 2.5], [100, 80, 50, 0]))
+            r_scores.append(np.interp(cr, [0.7, 1.1, 1.8, 3.0], [10, 60, 100, 80]))
 
     scores['risk'] = np.mean(r_scores) if r_scores else 50.0
 
-    # 4. Technical
+    # 4. TECHNICAL / MOMENTUM SCORE
     t_scores = []
-    if metrics.get('above_sma200', False):
-        t_scores.append(80)
-    else:
-        t_scores.append(20)
+    t_scores.append(85 if metrics.get('above_sma200', False) else 25)
 
     perf_6m = metrics.get('perf_6m')
     if pd.notna(perf_6m):
-        t_scores.append(np.interp(perf_6m, [-0.20, 0.0, 0.15, 0.40], [10, 40, 75, 100]))
+        t_scores.append(np.interp(perf_6m, [-0.25, 0.0, 0.15, 0.35], [0, 40, 75, 100]))
 
     scores['tech'] = np.mean(t_scores) if t_scores else 50.0
 
+    # GESAMTSCORE (Sektor-Gewichtung)
     total_score = (
         scores['valuation'] * weights['valuation'] +
         scores['quality'] * weights['quality'] +
@@ -264,7 +285,7 @@ def score_stock_v9(metrics):
 # ==============================================================================
 
 def main():
-    st.title("📊 Quant-Aktien-Screener V9")
+    st.title("📊 Quant-Aktien-Screener V9.1")
     st.caption("Sektor-adaptives Quant-Scoring basierend auf Valuation, Quality, Risk & Momentum")
 
     # Sidebar: Ticker-Eingabe & Filter
