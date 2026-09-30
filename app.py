@@ -1,324 +1,308 @@
+import numpy as np
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
 
-# -----------------------------
-# 0. HELPER FÜR SICHERE PROZENTUMRECHNUNG
-# -----------------------------
-def safe_pct(val):
-    if val is None or pd.isna(val):
-        return None
-    try:
-        return float(val) * 100.0
-    except (ValueError,TypeError):
-        return None
+# ==============================================================================
+# 1. KONFIGURATION & SEKTOR-REFERENZKURVEN (Absolutes Scoring)
+# ==============================================================================
 
-# -----------------------------
-# 1. INTERPOLATIONSSCORE-FUNKTION
-# -----------------------------
-def get_score_interpolated(value, min_val, max_val, reverse=False):
-    if value is None or pd.isna(value):
-        return None
+# Gewichtung der Hauptkategorien (Summe = 1.0)
+CATEGORY_WEIGHTS = {
+    "valuation": 0.30,
+    "quality": 0.35,
+    "growth": 0.15,
+    "dip": 0.10,
+    "momentum": 0.10,
+}
 
-    if reverse and value < 0:
-        return 0.0
-
-    lower = min(min_val, max_val)
-    upper = max(min_val, max_val)
-    clamped_val = max(min(value, upper), lower)
-
-    if upper == lower:
-        normalized = 1.0
-    else:
-        normalized = (clamped_val - lower) / (upper - lower)
-
-    if reverse:
-        normalized = 1.0 - normalized
-
-    return normalized * 10
-
-# -----------------------------
-# 2. VISUELLE INDIKATOREN & EMPFEHLUNG
-# -----------------------------
-def get_star_rating(score):
-    if score is None:
-        return "N/A"
-    stars_count = round((score / 10) * 5)
-    stars_count = max(0, min(5, stars_count))
-    filled = "★" * stars_count
-    empty = "☆" * (5 - stars_count)
-    return f"{filled}{empty} ({round(score / 2, 1)})"
-
-def get_recommendation(score):
-    if score is None:
-        return "Keine Daten"
-    if score >= 8.0:
-        return "Strong Buy 🟢"
-    elif score >= 6.5:
-        return "Buy 🟢"
-    elif score >= 5.0:
-        return "Hold 🟡"
-    elif score >= 3.5:
-        return "Sell 🔴"
-    else:
-        return "Strong Sell 🔴"
-
-def get_risk_label(risk_score):
-    if risk_score is None:
-        return "N/A"
-    if risk_score >= 7.5:
-        return "Niedrig 🛡️"
-    elif risk_score >= 5.0:
-        return "Moderat ⚖️"
-    elif risk_score >= 3.0:
-        return "Erhöht ⚠️️"
-    else:
-        return "Hoch 🚨"
-
-# -----------------------------
-# 3. SEKTORSPEZIFISCHE BOUNDS (Auf Zukunftswachstum kalibriert)
-# -----------------------------
-SECTOR_BOUNDS = {
+# Sektorbezogene 5-Punkt-Skalierung für absolute Kennzahlen
+# Format: [Skalierungswerte für Scores 0, 25, 50, 75, 100]
+SECTOR_REFERENCES = {
     "Technology": {
-        "roe": (-10, 35), "operating_margin": (-10, 40), 
-        "forward_pe": (12, 40),           # Relevanter für High-Growth
-        "pe": (15, 60), 
-        "debt_to_equity": (0, 100), 
-        "revenue_growth": (-5, 35),       # Stärkeres Wachstum belohnen
-        "peg": (0.5, 2.5),                 # Belohnt gutes Wachstum trotz hohem KGV
-        "eps_growth": (-5, 35), 
-        "profit_margin": (-10, 30),
-        "cash_to_debt": (0.5, 3.0), 
-        "fcf_yield": (0, 6), 
-        "beta": (0.7, 1.6)
-    },
-    "Healthcare": {
-        "roe": (-10, 25), "operating_margin": (-5, 30), "forward_pe": (12, 30),
-        "pe": (15, 35), "debt_to_equity": (0, 120), "revenue_growth": (-5, 15),
-        "peg": (0.8, 2.5), "eps_growth": (-5, 20), "profit_margin": (-5, 25),
-        "cash_to_debt": (0.3, 2.0), "fcf_yield": (0, 8), "beta": (0.4, 1.2)
+        "pe": [60, 45, 30, 20, 12],
+        "peg": [3.0, 2.2, 1.5, 1.0, 0.5],
+        "ev_ebitda": [30, 22, 16, 11, 6],
+        "fcf_yield": [0.0, 0.02, 0.04, 0.06, 0.09],
+        "gross_margin": [0.20, 0.35, 0.50, 0.65, 0.80],
+        "operating_margin": [0.05, 0.12, 0.20, 0.28, 0.38],
+        "roe": [0.05, 0.12, 0.20, 0.30, 0.45],
+        "fcf_conversion": [0.30, 0.50, 0.70, 0.90, 1.10],
     },
     "Consumer Cyclical": {
-        "roe": (-10, 20), "operating_margin": (-5, 20), "forward_pe": (10, 25),
-        "pe": (12, 30), "debt_to_equity": (0, 200), "revenue_growth": (-5, 15),
-        "peg": (0.6, 2.2), "eps_growth": (-5, 18), "profit_margin": (-5, 15),
-        "cash_to_debt": (0.2, 1.5), "fcf_yield": (0, 9), "beta": (0.7, 1.6)
+        "pe": [45, 35, 24, 16, 10],
+        "peg": [2.8, 2.0, 1.4, 0.9, 0.5],
+        "ev_ebitda": [22, 16, 12, 8, 5],
+        "fcf_yield": [0.0, 0.02, 0.045, 0.07, 0.10],
+        "gross_margin": [0.15, 0.28, 0.40, 0.52, 0.65],
+        "operating_margin": [0.03, 0.07, 0.12, 0.18, 0.25],
+        "roe": [0.04, 0.10, 0.16, 0.24, 0.35],
+        "fcf_conversion": [0.25, 0.45, 0.65, 0.85, 1.05],
     },
-    "Financial Services": {
-        "roe": (0, 18), "operating_margin": (0, 25), "forward_pe": (6, 18),
-        "pe": (8, 20), "debt_to_equity": (0, 800), "revenue_growth": (-5, 12),
-        "peg": (0.5, 2.0), "eps_growth": (-5, 15), "profit_margin": (0, 25),
-        "cash_to_debt": (0.0, 1.0), "fcf_yield": (0, 10), "beta": (0.5, 1.4)
+    "Default": {
+        "pe": [50, 38, 25, 17, 10],
+        "peg": [2.8, 2.0, 1.4, 0.9, 0.5],
+        "ev_ebitda": [25, 18, 13, 9, 5],
+        "fcf_yield": [0.0, 0.02, 0.04, 0.065, 0.09],
+        "gross_margin": [0.15, 0.30, 0.45, 0.60, 0.75],
+        "operating_margin": [0.04, 0.09, 0.15, 0.22, 0.30],
+        "roe": [0.05, 0.10, 0.18, 0.25, 0.35],
+        "fcf_conversion": [0.30, 0.50, 0.70, 0.85, 1.00],
     },
-    "DEFAULT": {
-        "roe": (-10, 25), "operating_margin": (-10, 35), "forward_pe": (10, 30),
-        "pe": (10, 35), "debt_to_equity": (0, 150), "revenue_growth": (-5, 20),
-        "peg": (0.5, 2.5), "eps_growth": (-5, 25), "profit_margin": (-10, 30),
-        "cash_to_debt": (0, 2.0), "fcf_yield": (0, 8), "beta": (0.5, 1.5)
-    }
 }
 
-REVERSE_METRICS = ["peg", "forward_pe", "pe", "debt_to_equity", "beta"]
-
-# -----------------------------
-# 4. TEIL-GEWICHTUNGEN (Fokus auf Zukunfts-Bewertung)
-# -----------------------------
-QUALITY_WEIGHTS = {
-    "eps_growth": 0.30,        # Zukunftswachstum
-    "revenue_growth": 0.25,    # Umsatztrends
-    "operating_margin": 0.20,
-    "roe": 0.15,
-    "profit_margin": 0.10
+# Zuordnung manueller Peer-Groups für die relative Bewertung
+PEER_GROUPS = {
+    "Semiconductors": ["NVDA", "TSM", "AVGO", "AMD", "INTC", "QCOM", "MU", "ASML", "AMAT", "LRCX"],
+    "BigTech": ["MSFT", "AAPL", "GOOGL", "AMZN", "META"],
+    "Beverages": ["KO", "PEP"],
+    "Pharma": ["PFE", "NVO"],
 }
 
-VALUATION_WEIGHTS = {
-    "forward_pe": 0.45,        # Zukunfts-KGV stärkstes Gewicht!
-    "peg": 0.35,               # Wachstum relativ zum KGV
-    "fcf_yield": 0.12,
-    "pe": 0.08                 # Historisches KGV spielt kaum noch eine Rolle
-}
+# ==============================================================================
+# 2. HILFSFUNKTIONEN UND SCORING-LOGIK
+# ==============================================================================
 
-# Risikoseite: Erfasst Volatilität und bilanzielle Absicherung extrem streng
-RISK_WEIGHTS = {
-    "beta": 0.55,            # Schwankung am Markt
-    "debt_to_equity": 0.25,  # Verschuldung
-    "cash_to_debt": 0.20     # Liquidität
-}
+def get_sector_ref(sector: str) -> dict:
+    """Gibt das passende Sektor-Referenzprofil zurück."""
+    return SECTOR_REFERENCES.get(sector, SECTOR_REFERENCES["Default"])
 
-def calculate_sub_score(data, weights, sector=None):
-    total_score = 0.0
-    total_weight = 0.0
-    bounds = SECTOR_BOUNDS.get(sector, SECTOR_BOUNDS["DEFAULT"])
 
-    for metric, weight in weights.items():
-        val = data.get(metric)
-        is_reverse = metric in REVERSE_METRICS
+def interpolate_score(value: float, points: list, reverse: bool = False) -> float:
+    """
+    Interpoliert stufenlos einen Wert auf eine Skala von 0 bis 100 Punkte.
+    reverse=True -> Kleinerer Wert = Höherer Score (z. B. bei KGV, PEG)
+    """
+    if value is None or np.isnan(value):
+        return np.nan
 
-        if metric in bounds:
-            min_v, max_v = bounds[metric]
-            score = get_score_interpolated(val, min_v, max_v, reverse=is_reverse)
+    xp = points
+    fp = [0.0, 25.0, 50.0, 75.0, 100.0]
 
-            if score is not None:
-                total_score += score * weight
-                total_weight += weight
+    if reverse:
+        xp = list(reversed(points))
+        fp = list(reversed(fp))
 
-    if total_weight == 0:
-        return None
+    return float(np.interp(value, xp, fp))
 
-    return round(total_score / total_weight, 2)
 
-# -----------------------------
-# 5. STREAMLIT UI & SIDEBAR CONFIG
-# -----------------------------
-st.set_page_config(page_title="Alex Overall KPI Agent", layout="wide")
+def compute_percentile_score(series: pd.Series, reverse: bool = False) -> pd.Series:
+    """Berechnet das Perzentil (0-100) innerhalb einer Peer-Group."""
+    valid = series.dropna()
+    if len(valid) < 2:
+        return pd.Series(50.0, index=series.index)
 
-# --- SIDEBAR: DYNAMISCHE GEWICHTUNG ---
-st.sidebar.header("⚙ Score-Gewichtung")
-st.sidebar.write("Steuere das Verhältnis zwischen Wachstumschancen & Risiko:")
+    ranks = valid.rank(pct=True) * 100.0
+    if reverse:
+        ranks = 100.0 - ranks
 
-raw_quality = st.sidebar.slider("Qualitäts- Score", min_value=0, max_value=100, value=45, step=5)
-raw_valuation = st.sidebar.slider("Bewertungs- Score (Forward Focus)", min_value=0, max_value=100, value=35, step=5)
-raw_risk = st.sidebar.slider("Risiko- Filter (Bremse für High-Beta)", min_value=0, max_value=100, value=20, step=5)
+    res = pd.Series(np.nan, index=series.index)
+    res.update(ranks)
+    return res
 
-raw_sum = raw_quality + raw_valuation + raw_risk
 
-if raw_sum > 0:
-    weight_quality = raw_quality / raw_sum
-    weight_valuation = raw_valuation / raw_sum
-    weight_risk = raw_risk / raw_sum
-else:
-    weight_quality = 0.45
-    weight_valuation = 0.35
-    weight_risk = 0.20
+# ==============================================================================
+# 3. KERN-ALGORITHMUS (ALEX KPI STOCK SCORE V4)
+# ==============================================================================
 
-st.sidebar.divider()
-st.sidebar.markdown("**Effektive Gewichtung:**")
-st.sidebar.info(
-    f"• **Qualität:** {weight_quality*100:.1f}%\n"
-    f"• **Bewertung:** {weight_valuation*100:.1f}%\n"
-    f"• **Sicherheit:** {weight_risk*100:.1f}%"
-)
+def calculate_v4_score(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Berechnet den hybriden Alex KPI Stock Score V4 (60% Absolut + 40% Relativ).
+    """
+    scores_df = df.copy()
 
-# --- MAIN PANEL ---
-st.title("📊 Alex-KPI Gesamt-Analyse")
-st.write(
-    f"Aktuelle Konfiguration: **Qualität ({weight_quality*100:.0f}%)** | "
-    f"**Bewertung/Zukunft ({weight_valuation*100:.0f}%)** | "
-    f"**Risikofilter ({weight_risk*100:.0f}%)**"
-)
+    # --------------------------------------------------------------------------
+    # A. ABSOLUTES SCORING (60% Gewichtung)
+    # --------------------------------------------------------------------------
+    abs_valuation = []
+    abs_quality = []
+    abs_growth = []
+    abs_dip = []
+    abs_momentum = []
 
-tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, GOOGL, NVDA, MRVL, TSM, MU")
+    for idx, row in df.iterrows():
+        sec_ref = get_sector_ref(row.get("sector", "Default"))
 
-if tickers_input:
-    tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-    results = []
+        # Valuation
+        s_pe = interpolate_score(row.get("pe"), sec_ref["pe"], reverse=True)
+        s_peg = interpolate_score(row.get("peg"), sec_ref["peg"], reverse=True)
+        s_ev = interpolate_score(row.get("ev_ebitda"), sec_ref["ev_ebitda"], reverse=True)
+        s_fcf_y = interpolate_score(row.get("fcf_yield"), sec_ref["fcf_yield"], reverse=False)
+        abs_val = np.nanmean([s_pe, s_peg, s_ev, s_fcf_y])
 
-    if tickers:
-        with st.spinner("Rufe Echtzeit-Marktdaten ab..."):
-            for ticker in tickers:
-                try:
-                    stock = yf.Ticker(ticker)
-                    info = stock.info
+        # Quality
+        s_gm = interpolate_score(row.get("gross_margin"), sec_ref["gross_margin"], reverse=False)
+        s_om = interpolate_score(row.get("operating_margin"), sec_ref["operating_margin"], reverse=False)
+        s_roe = interpolate_score(row.get("roe"), sec_ref["roe"], reverse=False)
+        s_fcf_c = interpolate_score(row.get("fcf_conversion"), sec_ref["fcf_conversion"], reverse=False)
+        abs_qual = np.nanmean([s_gm, s_om, s_roe, s_fcf_c])
 
-                    if not info or "symbol" not in info:
-                        continue
+        # Growth & Growth Quality
+        rev_g = row.get("revenue_growth", np.nan)
+        eps_g = row.get("eps_growth", np.nan)
+        
+        s_rev = interpolate_score(rev_g, [-0.05, 0.02, 0.08, 0.15, 0.25], reverse=False)
+        s_eps = interpolate_score(eps_g, [-0.05, 0.03, 0.10, 0.18, 0.30], reverse=False)
+        
+        # Growth Quality Bonus/Malus (EPS Growth - Revenue Growth)
+        growth_diff = eps_g - rev_g if not (np.isnan(eps_g) or np.isnan(rev_g)) else 0
+        s_g_qual = interpolate_score(growth_diff, [-0.10, -0.03, 0.0, 0.05, 0.12], reverse=False)
+        abs_gro = np.nanmean([s_rev, s_eps, s_g_qual])
 
-                    company_name = info.get("longName") or info.get("shortName") or ticker
-                    sector = info.get("sector", "Unbekannt")
-                    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-                    currency = info.get("currency", "USD")
+        # Dip (Rücksetzer vom 52W-Hoch)
+        s_dip = interpolate_score(row.get("dist_52w_high"), [-0.40, -0.25, -0.15, -0.08, 0.0], reverse=False)
+        
+        # Momentum (Performance vs. Moving Averages)
+        dist_sma200 = row.get("dist_sma200", np.nan)
+        s_mom = interpolate_score(dist_sma200, [-0.20, -0.05, 0.05, 0.15, 0.30], reverse=False)
 
-                    fcf = info.get("freeCashflow")
-                    market_cap = info.get("marketCap")
-                    fcf_yield = (fcf / market_cap) * 100 if fcf and market_cap else None
+        # Zusammenfassung
+        abs_valuation.append(abs_val)
+        abs_quality.append(abs_qual)
+        abs_growth.append(abs_gro)
+        abs_dip.append(s_dip)
+        abs_momentum.append(s_mom)
 
-                    total_cash = info.get("totalCash", 0) or 0
-                    total_debt = info.get("totalDebt", 0) or 0
+    scores_df["abs_valuation"] = abs_valuation
+    scores_df["abs_quality"] = abs_quality
+    scores_df["abs_growth"] = abs_growth
+    scores_df["abs_dip"] = abs_dip
+    scores_df["abs_momentum"] = abs_momentum
 
-                    if total_debt == 0 and total_cash > 0:
-                        cash_to_debt = 10.0
-                    elif total_debt > 0:
-                        cash_to_debt = total_cash / total_debt
-                    else:
-                        cash_to_debt = None
+    # --------------------------------------------------------------------------
+    # B. RELATIYES SCORING (40% Gewichtung via Peer Group Perzentile)
+    # --------------------------------------------------------------------------
+    rel_valuation = pd.Series(np.nan, index=df.index)
+    rel_quality = pd.Series(np.nan, index=df.index)
+    rel_growth = pd.Series(np.nan, index=df.index)
 
-                    pe_val = info.get("trailingPE")
-                    trailing_eps = info.get("trailingEps")
-                    if pe_val is None and trailing_eps is not None and trailing_eps < 0:
-                        pe_val = -1
+    # Identifikation von Peer Groups
+    for peer_name, tickers in PEER_GROUPS.items():
+        mask = scores_df["ticker"].isin(tickers)
+        if mask.sum() > 1:
+            sub = scores_df[mask]
 
-                    metrics = {
-                        "pe": pe_val,
-                        "forward_pe": info.get("forwardPE"),
-                        "peg": info.get("pegRatio"),
-                        "profit_margin": safe_pct(info.get("profitMargins")),
-                        "operating_margin": safe_pct(info.get("operatingMargins")),
-                        "roe": safe_pct(info.get("returnOnEquity")),
-                        "revenue_growth": safe_pct(info.get("revenueGrowth")),
-                        "eps_growth": safe_pct(info.get("earningsGrowth")),
-                        "debt_to_equity": info.get("debtToEquity"),
-                        "cash_to_debt": cash_to_debt,
-                        "fcf_yield": fcf_yield,
-                        "beta": info.get("beta")
-                    }
+            p_pe = compute_percentile_score(sub["pe"], reverse=True)
+            p_peg = compute_percentile_score(sub["peg"], reverse=True)
+            p_fcf_y = compute_percentile_score(sub["fcf_yield"], reverse=False)
+            rel_val_sub = pd.concat([p_pe, p_peg, p_fcf_y], axis=1).mean(axis=1)
 
-                    quality_score = calculate_sub_score(metrics, QUALITY_WEIGHTS, sector=sector)
-                    valuation_score = calculate_sub_score(metrics, VALUATION_WEIGHTS, sector=sector)
-                    risk_safety_score = calculate_sub_score(metrics, RISK_WEIGHTS, sector=sector)
+            p_gm = compute_percentile_score(sub["gross_margin"], reverse=False)
+            p_om = compute_percentile_score(sub["operating_margin"], reverse=False)
+            p_roe = compute_percentile_score(sub["roe"], reverse=False)
+            rel_qual_sub = pd.concat([p_gm, p_om, p_roe], axis=1).mean(axis=1)
 
-                    scores_weighted = []
-                    weights_sum = 0.0
+            p_rev_g = compute_percentile_score(sub["revenue_growth"], reverse=False)
+            p_eps_g = compute_percentile_score(sub["eps_growth"], reverse=False)
+            rel_gro_sub = pd.concat([p_rev_g, p_eps_g], axis=1).mean(axis=1)
 
-                    if quality_score is not None and weight_quality > 0:
-                        scores_weighted.append(quality_score * weight_quality)
-                        weights_sum += weight_quality
-                    if valuation_score is not None and weight_valuation > 0:
-                        scores_weighted.append(valuation_score * weight_valuation)
-                        weights_sum += weight_valuation
-                    if risk_safety_score is not None and weight_risk > 0:
-                        scores_weighted.append(risk_safety_score * weight_risk)
-                        weights_sum += weight_risk
+            rel_valuation.update(rel_val_sub)
+            rel_quality.update(rel_qual_sub)
+            rel_growth.update(rel_gro_sub)
 
-                    overall_score = round(sum(scores_weighted) / weights_sum, 2) if weights_sum > 0 else None
-                    display_pe = "N/A (Verlust)" if pe_val == -1 else (round(pe_val, 2) if pe_val and pe_val > 0 else "N/A")
+    # Fülle fehlende Peer-Werte mit Absolut-Scores auf
+    scores_df["rel_valuation"] = rel_valuation.fillna(scores_df["abs_valuation"])
+    scores_df["rel_quality"] = rel_quality.fillna(scores_df["abs_quality"])
+    scores_df["rel_growth"] = rel_growth.fillna(scores_df["abs_growth"])
 
-                    results.append({
-                        "Ticker": ticker,
-                        "Unternehmen": company_name,
-                        "🏆 Alex Gesamtscore": overall_score,
-                        "Empfehlung": get_recommendation(overall_score),
-                        "Rating": get_star_rating(overall_score),
-                        "Aktueller Kurs": f"{current_price:.2f} {currency}" if current_price else "N/A",
-                        "Qualitäts Score": quality_score,
-                        "Bewertungs Score": valuation_score,
-                        "Sicherheits Score": risk_safety_score,
-                        "Risiko": get_risk_label(risk_safety_score),
-                        "Beta": round(metrics["beta"], 2) if metrics["beta"] else "N/A",
-                        "Forward P/E": round(metrics["forward_pe"], 2) if metrics["forward_pe"] else "N/A",
-                        "PEG Ratio": round(metrics["peg"], 2) if metrics["peg"] else None,
-                        "Sektor": sector
-                    })
-                except Exception as e:
-                    st.error(f"Fehler bei {ticker}: {str(e)}")
+    # --------------------------------------------------------------------------
+    # C. HYBRIDE KATEGORIE-SCORES (60% Absolut / 40% Relativ)
+    # --------------------------------------------------------------------------
+    scores_df["cat_valuation"] = 0.60 * scores_df["abs_valuation"] + 0.40 * scores_df["rel_valuation"]
+    scores_df["cat_quality"] = 0.60 * scores_df["abs_quality"] + 0.40 * scores_df["rel_quality"]
+    scores_df["cat_growth"] = 0.60 * scores_df["abs_growth"] + 0.40 * scores_df["rel_growth"]
+    scores_df["cat_dip"] = scores_df["abs_dip"]
+    scores_df["cat_momentum"] = scores_df["abs_momentum"]
 
-        if results:
-            df = pd.DataFrame(results)
-            df = df.sort_values(by="🏆 Alex Gesamtscore", ascending=False)
+    # --------------------------------------------------------------------------
+    # D. GESAMTSCORE BERECHNUNG & ANALYSTEN-GEWICHTUNG
+    # --------------------------------------------------------------------------
+    raw_total_score = (
+        scores_df["cat_valuation"] * CATEGORY_WEIGHTS["valuation"]
+        + scores_df["cat_quality"] * CATEGORY_WEIGHTS["quality"]
+        + scores_df["cat_growth"] * CATEGORY_WEIGHTS["growth"]
+        + scores_df["cat_dip"] * CATEGORY_WEIGHTS["dip"]
+        + scores_df["cat_momentum"] * CATEGORY_WEIGHTS["momentum"]
+    )
 
-            st.subheader("📊 Ergebnis-Matrix")
+    # Berücksichtigung von Analysten-Abdeckung
+    analyst_counts = scores_df.get("analyst_count", pd.Series(10, index=df.index))
+    confidence_factor = np.where(analyst_counts < 3, 0.85, np.where(analyst_counts < 8, 0.93, 1.0))
 
+    scores_df["final_v4_score"] = np.round(raw_total_score * confidence_factor, 2)
+
+    return scores_df
+
+
+# ==============================================================================
+# 4. STREAMLIT BENUTZEROBERFLÄCHE
+# ==============================================================================
+
+def main():
+    st.set_page_config(page_title="Alex KPI Stock Score V4", layout="wide")
+    st.title("📈 Alex KPI Stock Score V4 Screener")
+    st.caption("Hybrider Aktien-Screener (60% Absolut / 40% Peer Group Relativ)")
+
+    # Test-Datenset definieren
+    sample_tickers = ["NVDA", "TSM", "MSFT", "AAPL", "GOOGL", "AMZN", "KO", "PEP", "PFE", "NVO"]
+    
+    st.sidebar.header("Optionen")
+    selected_tickers = st.sidebar.multiselect("Aktien auswählen:", sample_tickers, default=sample_tickers)
+
+    if st.button("Score V4 berechnen"):
+        with st.spinner("Lade Marktdaten..."):
+            # Dummy-Struktur zur Demonstration (kann mit yfinance-Dataframe erweitert werden)
+            data_list = []
+            for t in selected_tickers:
+                ticker_obj = yf.Ticker(t)
+                info = ticker_obj.info
+                
+                # Sektor bestimmen
+                sector = info.get("sector", "Default")
+                
+                # Daten extrahieren mit Fallbacks
+                data_list.append({
+                    "ticker": t,
+                    "name": info.get("shortName", t),
+                    "sector": sector,
+                    "pe": info.get("trailingPE", np.nan),
+                    "peg": info.get("pegRatio", np.nan),
+                    "ev_ebitda": info.get("enterpriseToEbitda", np.nan),
+                    "fcf_yield": (info.get("freeCashflow", 0) / info.get("marketCap", 1)) if info.get("marketCap") else np.nan,
+                    "gross_margin": info.get("grossMargins", np.nan),
+                    "operating_margin": info.get("operatingMargins", np.nan),
+                    "roe": info.get("returnOnEquity", np.nan),
+                    "fcf_conversion": 0.8,  # Platzhalter-Wert für Demo
+                    "revenue_growth": info.get("revenueGrowth", np.nan),
+                    "eps_growth": info.get("earningsGrowth", np.nan),
+                    "dist_52w_high": (info.get("currentPrice", 0) - info.get("fiftyTwoWeekHigh", 1)) / info.get("fiftyTwoWeekHigh", 1) if info.get("fiftyTwoWeekHigh") else np.nan,
+                    "dist_sma200": 0.05,  # Platzhalter
+                    "analyst_count": info.get("numberOfAnalystOpinions", 10),
+                })
+
+            df_input = pd.DataFrame(data_list)
+            df_scored = calculate_v4_score(df_input)
+
+            # Ergebnistabelle formatieren
+            display_cols = [
+                "ticker",
+                "name",
+                "sector",
+                "final_v4_score",
+                "cat_valuation",
+                "cat_quality",
+                "cat_growth",
+                "cat_dip",
+                "cat_momentum",
+            ]
+            
+            res_df = df_scored[display_cols].sort_values(by="final_v4_score", ascending=False)
+            
+            st.subheader("📊 Ranking Ergebnisse")
             st.dataframe(
-                df,
-                use_container_width=True,
-                column_config={
-                    "🏆 Alex Gesamtscore": st.column_config.ProgressColumn(
-                        "🏆 Alex Gesamtscore",
-                        help="Gesamt-KPI Score auf einer Skala von 0 bis 10",
-                        format="%.2f",
-                        min_value=0,
-                        max_value=10,
-                    )
-                }
+                res_df.style.background_gradient(subset=["final_v4_score"], cmap="Greens"),
+                use_container_width=True
             )
-        else:
-            st.info("Es konnten keine Daten für die angegebenen Ticker geladen werden.")
+
+if __name__ == "__main__":
+    main()
