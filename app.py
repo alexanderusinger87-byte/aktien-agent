@@ -6,7 +6,6 @@ import pandas as pd
 # 0. HELPER FÜR SICHERE PROZENTUMRECHNUNG
 # -----------------------------
 def safe_pct(val):
-    """Rechnet Dezimalwerte von yfinance sicher in Prozent um (hält 0.0 aufrecht)."""
     if val is None or pd.isna(val):
         return None
     try:
@@ -18,15 +17,11 @@ def safe_pct(val):
 # 1. INTERPOLATIONSSCORE-FUNKTION
 # -----------------------------
 def get_score_interpolated(value, min_val, max_val, reverse=False):
-    """
-    Berechnet einen stufenlosen Score zwischen 0 und 10 Punkten.
-    reverse=True bedeutet: Kleinere Werte sind BESSER (z.B. KGV, Beta, Schulden).
-    """
     if value is None or pd.isna(value):
         return None
 
     if reverse and value < 0:
-        return 0.0  # Negativwerte bei Reverse-Metriken = Höchstes Risiko / Verlust
+        return 0.0
 
     lower = min(min_val, max_val)
     upper = max(min_val, max_val)
@@ -88,7 +83,7 @@ SECTOR_BOUNDS = {
         "roe": (-10, 35), "operating_margin": (-10, 40), "forward_pe": (15, 45),
         "pe": (15, 50), "debt_to_equity": (0, 100), "revenue_growth": (-5, 30),
         "peg": (0.8, 3.0), "eps_growth": (-5, 30), "profit_margin": (-10, 30),
-        "cash_to_debt": (0.5, 3.0), "fcf_yield": (0, 6), "beta": (0.7, 1.5)  # Beta Obergrenze gesenkt für strengeres Volatilitäts-Rating
+        "cash_to_debt": (0.5, 3.0), "fcf_yield": (0, 6), "beta": (0.7, 1.5)
     },
     "Healthcare": {
         "roe": (-10, 25), "operating_margin": (-5, 30), "forward_pe": (12, 30),
@@ -130,7 +125,6 @@ VALUATION_WEIGHTS = {
     "peg": 0.40, "forward_pe": 0.30, "pe": 0.15, "fcf_yield": 0.15
 }
 
-# Angepasst: Beta (Schwankungsrisiko) jetzt mit 50% Hauptgewicht
 RISK_WEIGHTS = {
     "beta": 0.50,            # Kursschwankung / Sektor-Zyklik
     "debt_to_equity": 0.25,  # Verschuldung
@@ -160,11 +154,44 @@ def calculate_sub_score(data, weights, sector=None):
     return round(total_score / total_weight, 2)
 
 # -----------------------------
-# 5. STREAMLIT UI
+# 5. STREAMLIT UI & SIDEBAR CONFIG
 # -----------------------------
 st.set_page_config(page_title="Alex Overall KPI Agent", layout="wide")
+
+# --- SIDEBAR: DYNAMISCHE GEWICHTUNG ---
+st.sidebar.header("⚙️️ Score-Gewichtung")
+st.sidebar.write("Passen Sie die Wichtigkeit der 3 Säulen an:")
+
+raw_quality = st.sidebar.slider("Qualitäts-Score", min_value=0, max_value=100, value=45, step=5)
+raw_valuation = st.sidebar.slider("Bewertungs-Score", min_value=0, max_value=100, value=35, step=5)
+raw_risk = st.sidebar.slider("Risiko-/Sicherheits-Score", min_value=0, max_value=100, value=20, step=5)
+
+raw_sum = raw_quality + raw_valuation + raw_risk
+
+if raw_sum > 0:
+    weight_quality = raw_quality / raw_sum
+    weight_valuation = raw_valuation / raw_sum
+    weight_risk = raw_risk / raw_sum
+else:
+    weight_quality = 0.45
+    weight_valuation = 0.35
+    weight_risk = 0.20
+
+st.sidebar.divider()
+st.sidebar.markdown("**Effektive Gewichtung (auf 100% normiert):**")
+st.sidebar.info(
+    f"• **Qualität:** {weight_quality*100:.1f}%\n"
+    f"• **Bewertung:** {weight_valuation*100:.1f}%\n"
+    f"• **Sicherheit:** {weight_risk*100:.1f}%"
+)
+
+# --- MAIN PANEL ---
 st.title("📊 Alex-KPI Gesamt-Analyse")
-st.write("Gewichtung: **Qualität (45%)** | **Bewertung/Preis (40%)** | **Risiko (15%)**")
+st.write(
+    f"Aktuelle Konfiguration: **Qualität ({weight_quality*100:.0f}%)** | "
+    f"**Bewertung ({weight_valuation*100:.0f}%)** | "
+    f"**Risiko ({weight_risk*100:.0f}%)**"
+)
 
 tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, GOOGL, NVDA, TSM, MU")
 
@@ -228,15 +255,15 @@ if tickers_input:
                     scores_weighted = []
                     weights_sum = 0.0
 
-                    if quality_score is not None:
-                        scores_weighted.append(quality_score * 0.45)
-                        weights_sum += 0.45
-                    if valuation_score is not None:
-                        scores_weighted.append(valuation_score * 0.40)
-                        weights_sum += 0.40
-                    if risk_safety_score is not None:
-                        scores_weighted.append(risk_safety_score * 0.15)
-                        weights_sum += 0.15
+                    if quality_score is not None and weight_quality > 0:
+                        scores_weighted.append(quality_score * weight_quality)
+                        weights_sum += weight_quality
+                    if valuation_score is not None and weight_valuation > 0:
+                        scores_weighted.append(valuation_score * weight_valuation)
+                        weights_sum += weight_valuation
+                    if risk_safety_score is not None and weight_risk > 0:
+                        scores_weighted.append(risk_safety_score * weight_risk)
+                        weights_sum += weight_risk
 
                     overall_score = round(sum(scores_weighted) / weights_sum, 2) if weights_sum > 0 else None
                     display_pe = "N/A (Verlust)" if pe_val == -1 else (round(pe_val, 2) if pe_val and pe_val > 0 else "N/A")
@@ -266,7 +293,6 @@ if tickers_input:
 
             st.subheader("📊 Ergebnis-Matrix")
 
-            # Native Streamlit-Formatierung mit visueller Progress-Bar für den Gesamtscore
             st.dataframe(
                 df,
                 use_container_width=True,
