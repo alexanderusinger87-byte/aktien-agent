@@ -88,7 +88,7 @@ SECTOR_BOUNDS = {
         "roe": (-10, 35), "operating_margin": (-10, 40), "forward_pe": (15, 45),
         "pe": (15, 50), "debt_to_equity": (0, 100), "revenue_growth": (-5, 30),
         "peg": (0.8, 3.0), "eps_growth": (-5, 30), "profit_margin": (-10, 30),
-        "cash_to_debt": (0.5, 3.0), "fcf_yield": (0, 6), "beta": (0.8, 1.8)
+        "cash_to_debt": (0.5, 3.0), "fcf_yield": (0, 6), "beta": (0.7, 1.5)  # Beta Obergrenze gesenkt für strengeres Volatilitäts-Rating
     },
     "Healthcare": {
         "roe": (-10, 25), "operating_margin": (-5, 30), "forward_pe": (12, 30),
@@ -130,10 +130,11 @@ VALUATION_WEIGHTS = {
     "peg": 0.40, "forward_pe": 0.30, "pe": 0.15, "fcf_yield": 0.15
 }
 
+# Angepasst: Beta (Schwankungsrisiko) jetzt mit 50% Hauptgewicht
 RISK_WEIGHTS = {
-    "debt_to_equity": 0.40,
-    "cash_to_debt": 0.30,
-    "beta": 0.30
+    "beta": 0.50,            # Kursschwankung / Sektor-Zyklik
+    "debt_to_equity": 0.25,  # Verschuldung
+    "cash_to_debt": 0.25     # Liquiditäts-Puffer
 }
 
 def calculate_sub_score(data, weights, sector=None):
@@ -165,7 +166,7 @@ st.set_page_config(page_title="Alex Overall KPI Agent", layout="wide")
 st.title("📊 Alex-KPI Gesamt-Analyse")
 st.write("Gewichtung: **Qualität (45%)** | **Bewertung/Preis (40%)** | **Risiko (15%)**")
 
-tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, JNJ, NVDA, AAPL")
+tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, GOOGL, NVDA, TSM, MU")
 
 if tickers_input:
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
@@ -265,16 +266,19 @@ if tickers_input:
 
             st.subheader("📊 Ergebnis-Matrix")
 
-            styled_df = df.style.background_gradient(
-                cmap="YlGn", 
-                subset=["🏆 Alex Gesamtscore"],
-                vmin=0.0, 
-                vmax=10.0
-            ).format(
-                {"🏆 Alex Gesamtscore": "{:.2f}"}, 
-                na_rep="N/A"
+            # Native Streamlit-Formatierung mit visueller Progress-Bar für den Gesamtscore
+            st.dataframe(
+                df,
+                use_container_width=True,
+                column_config={
+                    "🏆 Alex Gesamtscore": st.column_config.ProgressColumn(
+                        "🏆 Alex Gesamtscore",
+                        help="Gesamt-KPI Score auf einer Skala von 0 bis 10",
+                        format="%.2f",
+                        min_value=0,
+                        max_value=10,
+                    )
+                }
             )
-
-            st.dataframe(styled_df, use_container_width=True)
         else:
             st.info("Es konnten keine Daten für die angegebenen Ticker geladen werden.")
