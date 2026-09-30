@@ -51,6 +51,17 @@ def clean_percentage(val):
         return val / 100.0
     return val
 
+def get_recommendation(score):
+    """Ermittelt die Kaufempfehlung anhand des Gesamtscores."""
+    if score >= 75:
+        return "🟢 Starker Kauf"
+    elif score >= 60:
+        return "🟡 Kauf"
+    elif score >= 45:
+        return "🟠 Halten"
+    else:
+        return "🔴 Verkaufen"
+
 @st.cache_data(ttl=3600*12)
 def fetch_stock_data(ticker_symbol):
     try:
@@ -267,6 +278,11 @@ def main():
     
     min_score = st.sidebar.slider("Mindest-Gesamtscore", 0, 100, 50)
 
+    # Button zum Leeren des Caches (Erzwingt frische Live-Daten)
+    if st.sidebar.button("🔄 Live-Daten neu laden"):
+        st.cache_data.clear()
+        st.rerun()
+
     tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
     if st.sidebar.button("🚀 Screening starten", type="primary") or "results" not in st.session_state:
@@ -285,6 +301,7 @@ def main():
                     'Sektor': metrics['sector'],
                     'Kurs': metrics['current_price'],
                     'Gesamtscore': total_score,
+                    'Empfehlung': get_recommendation(total_score),
                     'Valuation': round(sub_scores['valuation'], 1),
                     'Quality': round(sub_scores['quality'], 1),
                     'Risk': round(sub_scores['risk'], 1),
@@ -304,18 +321,25 @@ def main():
     df_results = st.session_state.get("results", pd.DataFrame())
 
     if not df_results.empty:
-        # Filter anwenden
         filtered_df = df_results[df_results['Gesamtscore'] >= min_score].sort_values(by="Gesamtscore", ascending=False)
 
         st.subheader("🏆 Screener Ergebnisse")
         
-        # Formatierte Anzeige-Tabelle
-        display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Fwd)', 'PEG']
+        display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Empfehlung', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Fwd)', 'PEG']
         
+        # Farbskala (Heatmap) auf den Gesamtscore anwenden
+        styled_df = filtered_df[display_columns].style.background_gradient(
+            subset=['Gesamtscore'],
+            cmap='RdYlGn',
+            vmin=0,
+            vmax=100
+        )
+
         st.dataframe(
-            filtered_df[display_columns],
+            styled_df,
             column_config={
-                "Gesamtscore": st.column_config.ProgressColumn("Gesamtscore", min_value=0, max_value=100, format="%.1f"),
+                "Gesamtscore": st.column_config.NumberColumn(format="%.1f"),
+                "Empfehlung": st.column_config.TextColumn("Kaufempfehlung"),
                 "Valuation": st.column_config.NumberColumn(format="%.1f"),
                 "Quality": st.column_config.NumberColumn(format="%.1f"),
                 "Risk": st.column_config.NumberColumn(format="%.1f"),
@@ -342,6 +366,7 @@ def main():
                 st.markdown(f"### **{stock_data['Name']} ({stock_data['Ticker']})**")
                 st.write(f"**Sektor:** {stock_data['Sektor']}")
                 st.write(f"**Aktueller Kurs:** {stock_data['Kurs']:.2f} $")
+                st.write(f"**Einstufung:** {stock_data['Empfehlung']}")
                 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Gesamtscore", f"{stock_data['Gesamtscore']} / 100")
@@ -349,7 +374,6 @@ def main():
                 m3.metric("PEG", f"{stock_data['PEG']:.2f}" if pd.notna(stock_data['PEG']) else "N/A")
 
             with col2:
-                # Radar Chart für Subscores
                 categories = ['Valuation', 'Quality', 'Risk', 'Momentum / Tech']
                 values = [sub['valuation'], sub['quality'], sub['risk'], sub['tech']]
 
