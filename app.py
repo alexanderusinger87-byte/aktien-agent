@@ -10,7 +10,7 @@ def safe_pct(val):
         return None
     try:
         return float(val) * 100.0
-    except (ValueError, TypeError):
+    except (ValueError,TypeError):
         return None
 
 # -----------------------------
@@ -71,19 +71,26 @@ def get_risk_label(risk_score):
     elif risk_score >= 5.0:
         return "Moderat ⚖️"
     elif risk_score >= 3.0:
-        return "Erhöht ⚠️"
+        return "Erhöht ⚠️️"
     else:
         return "Hoch 🚨"
 
 # -----------------------------
-# 3. SEKTORSPEZIFISCHE BOUNDS
+# 3. SEKTORSPEZIFISCHE BOUNDS (Auf Zukunftswachstum kalibriert)
 # -----------------------------
 SECTOR_BOUNDS = {
     "Technology": {
-        "roe": (-10, 35), "operating_margin": (-10, 40), "forward_pe": (15, 45),
-        "pe": (15, 50), "debt_to_equity": (0, 100), "revenue_growth": (-5, 30),
-        "peg": (0.8, 3.0), "eps_growth": (-5, 30), "profit_margin": (-10, 30),
-        "cash_to_debt": (0.5, 3.0), "fcf_yield": (0, 6), "beta": (0.7, 1.5)
+        "roe": (-10, 35), "operating_margin": (-10, 40), 
+        "forward_pe": (12, 40),           # Relevanter für High-Growth
+        "pe": (15, 60), 
+        "debt_to_equity": (0, 100), 
+        "revenue_growth": (-5, 35),       # Stärkeres Wachstum belohnen
+        "peg": (0.5, 2.5),                 # Belohnt gutes Wachstum trotz hohem KGV
+        "eps_growth": (-5, 35), 
+        "profit_margin": (-10, 30),
+        "cash_to_debt": (0.5, 3.0), 
+        "fcf_yield": (0, 6), 
+        "beta": (0.7, 1.6)
     },
     "Healthcare": {
         "roe": (-10, 25), "operating_margin": (-5, 30), "forward_pe": (12, 30),
@@ -114,21 +121,28 @@ SECTOR_BOUNDS = {
 REVERSE_METRICS = ["peg", "forward_pe", "pe", "debt_to_equity", "beta"]
 
 # -----------------------------
-# 4. TEIL-GEWICHTUNGEN
+# 4. TEIL-GEWICHTUNGEN (Fokus auf Zukunfts-Bewertung)
 # -----------------------------
 QUALITY_WEIGHTS = {
-    "roe": 0.30, "operating_margin": 0.25, "eps_growth": 0.20,
-    "revenue_growth": 0.15, "profit_margin": 0.10
+    "eps_growth": 0.30,        # Zukunftswachstum
+    "revenue_growth": 0.25,    # Umsatztrends
+    "operating_margin": 0.20,
+    "roe": 0.15,
+    "profit_margin": 0.10
 }
 
 VALUATION_WEIGHTS = {
-    "peg": 0.40, "forward_pe": 0.30, "pe": 0.15, "fcf_yield": 0.15
+    "forward_pe": 0.45,        # Zukunfts-KGV stärkstes Gewicht!
+    "peg": 0.35,               # Wachstum relativ zum KGV
+    "fcf_yield": 0.12,
+    "pe": 0.08                 # Historisches KGV spielt kaum noch eine Rolle
 }
 
+# Risikoseite: Erfasst Volatilität und bilanzielle Absicherung extrem streng
 RISK_WEIGHTS = {
-    "beta": 0.50,            # Kursschwankung / Sektor-Zyklik
+    "beta": 0.55,            # Schwankung am Markt
     "debt_to_equity": 0.25,  # Verschuldung
-    "cash_to_debt": 0.25     # Liquiditäts-Puffer
+    "cash_to_debt": 0.20     # Liquidität
 }
 
 def calculate_sub_score(data, weights, sector=None):
@@ -159,12 +173,12 @@ def calculate_sub_score(data, weights, sector=None):
 st.set_page_config(page_title="Alex Overall KPI Agent", layout="wide")
 
 # --- SIDEBAR: DYNAMISCHE GEWICHTUNG ---
-st.sidebar.header("⚙️️ Score-Gewichtung")
-st.sidebar.write("Passen Sie die Wichtigkeit der 3 Säulen an:")
+st.sidebar.header("⚙ Score-Gewichtung")
+st.sidebar.write("Steuere das Verhältnis zwischen Wachstumschancen & Risiko:")
 
-raw_quality = st.sidebar.slider("Qualitäts-Score", min_value=0, max_value=100, value=45, step=5)
-raw_valuation = st.sidebar.slider("Bewertungs-Score", min_value=0, max_value=100, value=35, step=5)
-raw_risk = st.sidebar.slider("Risiko-/Sicherheits-Score", min_value=0, max_value=100, value=20, step=5)
+raw_quality = st.sidebar.slider("Qualitäts- Score", min_value=0, max_value=100, value=45, step=5)
+raw_valuation = st.sidebar.slider("Bewertungs- Score (Forward Focus)", min_value=0, max_value=100, value=35, step=5)
+raw_risk = st.sidebar.slider("Risiko- Filter (Bremse für High-Beta)", min_value=0, max_value=100, value=20, step=5)
 
 raw_sum = raw_quality + raw_valuation + raw_risk
 
@@ -178,7 +192,7 @@ else:
     weight_risk = 0.20
 
 st.sidebar.divider()
-st.sidebar.markdown("**Effektive Gewichtung (auf 100% normiert):**")
+st.sidebar.markdown("**Effektive Gewichtung:**")
 st.sidebar.info(
     f"• **Qualität:** {weight_quality*100:.1f}%\n"
     f"• **Bewertung:** {weight_valuation*100:.1f}%\n"
@@ -189,11 +203,11 @@ st.sidebar.info(
 st.title("📊 Alex-KPI Gesamt-Analyse")
 st.write(
     f"Aktuelle Konfiguration: **Qualität ({weight_quality*100:.0f}%)** | "
-    f"**Bewertung ({weight_valuation*100:.0f}%)** | "
-    f"**Risiko ({weight_risk*100:.0f}%)**"
+    f"**Bewertung/Zukunft ({weight_valuation*100:.0f}%)** | "
+    f"**Risikofilter ({weight_risk*100:.0f}%)**"
 )
 
-tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, GOOGL, NVDA, TSM, MU")
+tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, GOOGL, NVDA, MRVL, TSM, MU")
 
 if tickers_input:
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
@@ -280,7 +294,7 @@ if tickers_input:
                         "Sicherheits Score": risk_safety_score,
                         "Risiko": get_risk_label(risk_safety_score),
                         "Beta": round(metrics["beta"], 2) if metrics["beta"] else "N/A",
-                        "P/E (KGV)": display_pe,
+                        "Forward P/E": round(metrics["forward_pe"], 2) if metrics["forward_pe"] else "N/A",
                         "PEG Ratio": round(metrics["peg"], 2) if metrics["peg"] else None,
                         "Sektor": sector
                     })
