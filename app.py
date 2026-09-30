@@ -3,119 +3,137 @@ import yfinance as yf
 import pandas as pd
 
 # -----------------------------
-# GENERISCHE SCORING-FUNKTION
+# 1. INTERPOLATIONSSCORE-FUNKTION
 # -----------------------------
-def get_score(value, thresholds, reverse=False):
+def get_score_interpolated(value, min_val, max_val, reverse=False):
     """
-    Berechnet den Score anhand flexibler Schwellenwerte.
-    `thresholds` ist eine Liste von Tupeln: [(Schwelle, Score), ...]
-    `reverse=True` bedeutet: Niedrigerer Wert ist besser (z.B. KGV, Debt/Equity).
+    Berechnet einen stufenlosen Score zwischen 0 und 10 Punkten
+    mittels linearer Interpolation.
     """
     if value is None or pd.isna(value):
         return None
 
-    if not reverse:
-        # Höher ist besser
-        for limit, score in thresholds:
-            if value > limit:
-                return score
-        return thresholds[-1][1] if thresholds else 1
+    # Schutz vor negativen KGVs/PEGs (Verlustunternehmen erhalten 0 Punkte)
+    if reverse and value < 0:
+        return 0.0
+
+    lower = min(min_val, max_val)
+    upper = max(min_val, max_val)
+    clamped_val = max(min(value, upper), lower)
+
+    if upper == lower:
+        normalized = 1.0
     else:
-        # Niedriger ist besser
-        for limit, score in thresholds:
-            if value < limit:
-                return score
-        return thresholds[-1][1] if thresholds else 1
+        normalized = (clamped_val - lower) / (upper - lower)
+
+    if reverse:
+        normalized = 1.0 - normalized
+
+    return normalized * 10
 
 # -----------------------------
-# SCHWELLENWERTE (CONFIG)
+# 2. STERNE-RATING & EMPFEHLUNG (Basiert auf Price Score)
 # -----------------------------
-THRESHOLDS = {
-    "STANDARD": {
-        "roe": [(20, 10), (15, 8), (10, 6), (5, 4)],
-        "peg": [(1.0, 10), (1.5, 8), (2.0, 6)],
-        "operating_margin": [(30, 10), (20, 8), (10, 6)],
-        "forward_pe": [(12, 10), (18, 8), (25, 6)],
-        "pe": [(15, 10), (22, 8), (30, 6)],
-        "eps_growth": [(20, 10), (10, 8), (5, 6)],
-        "revenue_growth": [(15, 10), (8, 8), (3, 6)],
-        "profit_margin": [(25, 10), (15, 8), (8, 6)],
-        "debt_to_equity": [(30, 10), (60, 8), (100, 6)],  # Gefixt: Skala von yfinance (Prozent)
-        "cash_to_debt": [(1.5, 10), (1.0, 8), (0.5, 6)],
-        "fcf_yield": [(6, 10), (4, 8), (2, 6)]
+def get_star_rating(score):
+    """Wandelt einen 0-10 Score in ein visuelles 0-5 Sterne-Rating um."""
+    if score is None:
+        return "N/A"
+    
+    stars_count = round((score / 10) * 5)
+    stars_count = max(0, min(5, stars_count))
+    
+    filled = "★" * stars_count
+    empty = "☆" * (5 - stars_count)
+    return f"{filled}{empty} ({round(score / 2, 1)})"
+
+def get_recommendation(score):
+    """Leitet eine klare Handlungsempfehlung ab."""
+    if score is None:
+        return "Keine Daten"
+    if score >= 8.0:
+        return "Strong Buy 🟢"
+    elif score >= 6.5:
+        return "Buy 🟢"
+    elif score >= 5.0:
+        return "Hold 🟡"
+    elif score >= 3.5:
+        return "Sell 🔴"
+    else:
+        return "Strong Sell 🔴"
+
+# -----------------------------
+# 3. SEKTORSPEZIFISCHE BOUNDS
+# -----------------------------
+SECTOR_BOUNDS = {
+    "Technology": {
+        "roe": (10, 35), "operating_margin": (10, 40), "forward_pe": (15, 45),
+        "pe": (15, 50), "debt_to_equity": (0, 100), "revenue_growth": (5, 30),
+        "peg": (0.8, 3.0), "eps_growth": (5, 30), "profit_margin": (10, 30),
+        "cash_to_debt": (0.5, 3.0), "fcf_yield": (0, 6)
     },
-    "DEFENSIVE": {
-        "roe": [(18, 10), (12, 8), (8, 6), (4, 4)],
-        "operating_margin": [(25, 10), (18, 8), (10, 6)],
-        "forward_pe": [(12, 10), (16, 8), (22, 5)],
-        "pe": [(14, 10), (20, 8), (26, 5)],
-        "eps_growth": [(12, 10), (7, 8), (3, 6)],
-        "revenue_growth": [(10, 10), (6, 8), (2, 6)],
-        "profit_margin": [(20, 10), (12, 8), (6, 6)],
-        "debt_to_equity": [(25, 10), (50, 8), (80, 5)],  # Gefixt
-        "cash_to_debt": [(2.0, 10), (1.2, 8), (0.6, 6)],
-        "fcf_yield": [(7, 10), (5, 8), (3, 6)]
+    "Financial Services": {
+        "roe": (5, 18), "operating_margin": (5, 25), "forward_pe": (6, 18),
+        "pe": (8, 20), "debt_to_equity": (0, 800), "revenue_growth": (0, 12),
+        "peg": (0.5, 2.0), "eps_growth": (0, 15), "profit_margin": (5, 25),
+        "cash_to_debt": (0.0, 1.0), "fcf_yield": (0, 10)
     },
-    "OFFENSIVE": {
-        "revenue_growth": [(25, 10), (15, 8), (10, 6)],
-        "eps_growth": [(30, 10), (18, 8), (10, 6)],
-        "peg": [(1.0, 10), (1.6, 8), (2.2, 6)],
-        "roe": [(25, 10), (15, 8), (8, 5)],
-        "operating_margin": [(20, 10), (12, 8), (5, 5)],
-        "fcf_yield": [(5, 10), (3, 8), (1, 5)]
+    "DEFAULT": {
+        "roe": (0, 25), "operating_margin": (0, 35), "forward_pe": (10, 30),
+        "pe": (10, 35), "debt_to_equity": (0, 150), "revenue_growth": (0, 20),
+        "peg": (0.5, 2.5), "eps_growth": (0, 25), "profit_margin": (0, 30),
+        "cash_to_debt": (0, 2.0), "fcf_yield": (0, 8)
     }
 }
 
 REVERSE_METRICS = ["peg", "forward_pe", "pe", "debt_to_equity"]
 
-WEIGHTS = {
-    "STANDARD": {
-        "roe": 0.15, "peg": 0.12, "operating_margin": 0.10, "forward_pe": 0.10,
-        "pe": 0.08, "eps_growth": 0.10, "revenue_growth": 0.08, "profit_margin": 0.08,
-        "debt_to_equity": 0.05, "cash_to_debt": 0.04, "fcf_yield": 0.10
-    },
-    "DEFENSIVE": {
-        "operating_margin": 0.15, "roe": 0.13, "forward_pe": 0.13, "debt_to_equity": 0.12,
-        "fcf_yield": 0.12, "pe": 0.10, "cash_to_debt": 0.10, "eps_growth": 0.05,
-        "revenue_growth": 0.05, "profit_margin": 0.05
-    },
-    "OFFENSIVE": {
-        "revenue_growth": 0.20, "eps_growth": 0.20, "peg": 0.15, "roe": 0.15,
-        "operating_margin": 0.15, "fcf_yield": 0.15
-    }
+# -----------------------------
+# 4. GEWICHTUNG MENTALE METHODIK
+# -----------------------------
+# Qualitativ / Operativ (Unternehmensstärke)
+QUALITY_WEIGHTS = {
+    "roe": 0.25, "operating_margin": 0.20, "eps_growth": 0.15,
+    "revenue_growth": 0.15, "profit_margin": 0.10, "debt_to_equity": 0.08,
+    "cash_to_debt": 0.07
 }
 
-def calculate_category_score(data, category):
-    """Rechnet den gewichteten Score für ein Profil aus und gleicht fehlende Werte dynamisch aus."""
-    total_score = 0
-    total_weight = 0
+# Preis & Bewertung (Wie teuer ist die Aktie am Markt?)
+VALUATION_WEIGHTS = {
+    "peg": 0.40, "forward_pe": 0.30, "pe": 0.15, "fcf_yield": 0.15
+}
 
-    weights = WEIGHTS[category]
-    thresholds = THRESHOLDS[category]
+def calculate_sub_score(data, weights, sector=None):
+    """Berechnet einen gewichteten Teil-Score (Qualität oder Bewertung)."""
+    total_score = 0.0
+    total_weight = 0.0
+
+    bounds = SECTOR_BOUNDS.get(sector, SECTOR_BOUNDS["DEFAULT"])
 
     for metric, weight in weights.items():
         val = data.get(metric)
         is_reverse = metric in REVERSE_METRICS
-        score = get_score(val, thresholds.get(metric, []), reverse=is_reverse)
 
-        if score is not None:
-            total_score += score * weight
-            total_weight += weight
+        if metric in bounds:
+            min_v, max_v = bounds[metric]
+            score = get_score_interpolated(val, min_v, max_v, reverse=is_reverse)
+
+            if score is not None:
+                total_score += score * weight
+                total_weight += weight
 
     if total_weight == 0:
         return None
-    
-    # Skalierung auf 0–100 % (bzw. 0–10 Punkte) basierend auf den vorhandenen Daten
-    return round((total_score / total_weight) * 10, 2)
+
+    return round(total_score / total_weight, 2)
 
 # -----------------------------
-# STREAMLIT UI
+# 5. STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="Multi-Score Kriterien Agent", layout="wide")
-st.title("📊 Multi-Score KPI Analyse Agent")
-st.write("Vergleiche Aktien über das gesamte Risikospektrum: **Defensiv**, **Alex-KPI (Standard)** und **Offensiv**.")
+st.set_page_config(page_title="Alex Price Score Analyser", layout="wide")
+st.title("📊 Alex-KPI Aktien & Valuation Agent")
+st.write("Kombinierte Bewertung aus **Qualität (Fundamentaldaten)** und **Aktuellem Preis (Bewertung)**.")
 
-tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, JNJ, NVDA")
+tickers_input = st.text_input("Gib mehrere Ticker ein (getrennt durch Komma):", value="MSFT, JNJ, NVDA, AAPL")
 
 if tickers_input:
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
@@ -131,7 +149,12 @@ if tickers_input:
                     if not info or "symbol" not in info:
                         continue
 
-                    # Rohdaten auslesen
+                    company_name = info.get("longName") or info.get("shortName") or ticker
+                    sector = info.get("sector", "Unbekannt")
+                    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+                    currency = info.get("currency", "USD")
+
+                    # Kennzahlen berechnen
                     fcf = info.get("freeCashflow")
                     market_cap = info.get("marketCap")
                     fcf_yield = (fcf / market_cap) * 100 if fcf and market_cap else None
@@ -148,22 +171,38 @@ if tickers_input:
                         "operating_margin": info.get("operatingMargins") * 100 if info.get("operatingMargins") else None,
                         "roe": info.get("returnOnEquity") * 100 if info.get("returnOnEquity") else None,
                         "revenue_growth": info.get("revenueGrowth") * 100 if info.get("revenueGrowth") else None,
-                        "eps_growth": info.get("earningsGrowth") * 100 if info.get("earningsGrowth") else None,  # Gefixt auf Vorjahresvergleich
-                        "debt_to_equity": info.get("debtToEquity"),  # Liefert bereits Prozentwerte von yfinance
+                        "eps_growth": info.get("earningsGrowth") * 100 if info.get("earningsGrowth") else None,
+                        "debt_to_equity": info.get("debtToEquity"),
                         "cash_to_debt": cash_to_debt,
                         "fcf_yield": fcf_yield
                     }
 
+                    # Teil-Scores berechnen
+                    quality_score = calculate_sub_score(metrics, QUALITY_WEIGHTS, sector=sector)
+                    valuation_score = calculate_sub_score(metrics, VALUATION_WEIGHTS, sector=sector)
+
+                    # PRICE SCORE (Gesamtscore): 60% Qualität, 40% Aktuelle Bewertung/Preis
+                    if quality_score is not None and valuation_score is not None:
+                        price_score = round((quality_score * 0.60) + (valuation_score * 0.40), 2)
+                    elif quality_score is not None:
+                        price_score = quality_score
+                    else:
+                        price_score = valuation_score
+
                     results.append({
                         "Ticker": ticker,
-                        "Defensiv-Score": calculate_category_score(metrics, "DEFENSIVE"),
-                        "Alex-KPI Score": calculate_category_score(metrics, "STANDARD"),
-                        "Offensiv-Score": calculate_category_score(metrics, "OFFENSIVE"),
+                        "Unternehmen": company_name,
+                        "Aktueller Kurs": f"{current_price:.2f} {currency}" if current_price else "N/A",
+                        "Empfehlung": get_recommendation(price_score),
+                        "Rating": get_star_rating(price_score),
+                        "Price Score": price_score,
+                        "Qualitäts Score": quality_score,
+                        "Bewertungs Score": valuation_score,
+                        "Sektor": sector,
                         "P/E (KGV)": round(metrics["pe"], 2) if metrics["pe"] else None,
                         "Forward P/E": round(metrics["forward_pe"], 2) if metrics["forward_pe"] else None,
                         "PEG Ratio": round(metrics["peg"], 2) if metrics["peg"] else None,
                         "Revenue Growth (%)": round(metrics["revenue_growth"], 2) if metrics["revenue_growth"] else None,
-                        "EPS Growth (%)": round(metrics["eps_growth"], 2) if metrics["eps_growth"] else None,
                         "Operating Margin (%)": round(metrics["operating_margin"], 2) if metrics["operating_margin"] else None,
                         "FCF Yield (%)": round(metrics["fcf_yield"], 2) if metrics["fcf_yield"] else None
                     })
@@ -173,7 +212,8 @@ if tickers_input:
         if results:
             df = pd.DataFrame(results)
             st.subheader("📊 Ergebnis-Matrix")
-            df = df.sort_values(by="Alex-KPI Score", ascending=False)
+            # Sortierung nach dem neuen Price Score!
+            df = df.sort_values(by="Price Score", ascending=False)
             st.dataframe(df, use_container_width=True)
         else:
             st.info("Es konnten keine Daten für die angegebenen Ticker geladen werden.")
