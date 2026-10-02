@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V9.3 (Smart Turnaround Blend)",
+    page_title="Aktien-Screener V9.4 (Smart Turnaround Blend)",
     page_icon="📈",
     layout="wide"
 )
@@ -58,10 +58,6 @@ def get_turnaround_status(metrics):
         return "🛡️ Trend / Normal"
 
 def get_combined_recommendation(score, turnaround_status):
-    """
-    Kombiniert den harten Quant-Score mit dem Turnaround-Status,
-    um Widersprüche (z.B. starker Score aber fallendes Messer) zu lösen.
-    """
     if "Fallendes Messer" in turnaround_status:
         if score >= 60:
             return "🟠 Halten (Vorsicht: Fallendes Messer)"
@@ -85,7 +81,6 @@ def get_combined_recommendation(score, turnaround_status):
             return "🟠 Halten"
             
     else:
-        # Standard Quant-Score Empfehlung
         if score >= 75:
             return "🟢 Starker Kauf"
         elif score >= 60:
@@ -278,7 +273,7 @@ def score_stock_v9(metrics):
 # ==============================================================================
 
 def main():
-    st.title("📊 Quant-Aktien-Screener V9.3")
+    st.title("📊 Quant-Aktien-Screener V9.4")
     st.caption("Sektor-adaptives Quant-Scoring + Smart Turnaround Blend")
 
     st.sidebar.header("⚙️ Konfiguration")
@@ -339,15 +334,9 @@ def main():
         
         display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Empfehlung', 'Turnaround Status', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Fwd)']
         
-        styled_df = filtered_df[display_columns].style.background_gradient(
-            subset=['Gesamtscore'],
-            cmap='RdYlGn',
-            vmin=0,
-            vmax=100
-        )
-
+        # Direktes Anzeigen ohne Styler.background_gradient (löst den Matplotlib-Importfehler)
         st.dataframe(
-            styled_df,
+            filtered_df[display_columns],
             column_config={
                 "Gesamtscore": st.column_config.NumberColumn(format="%.1f"),
                 "Empfehlung": st.column_config.TextColumn("Kombinierte Empfehlung"),
