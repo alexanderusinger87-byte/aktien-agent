@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V9.7 (Direct Financials)",
+    page_title="Aktien-Screener V9.9 (Data Quality)",
     page_icon="📈",
     layout="wide"
 )
@@ -21,7 +21,17 @@ SECTOR_WEIGHTS = {
     'Healthcare': {'valuation': 0.25, 'quality': 0.40, 'risk': 0.20, 'tech': 0.15},
     'Consumer Cyclical': {'valuation': 0.30, 'quality': 0.30, 'risk': 0.20, 'tech': 0.20},
     'Consumer Defensive': {'valuation': 0.25, 'quality': 0.40, 'risk': 0.25, 'tech': 0.10},
+    'Energy': {'valuation': 0.30, 'quality': 0.30, 'risk': 0.25, 'tech': 0.15},
     'Default': {'valuation': 0.25, 'quality': 0.35, 'risk': 0.20, 'tech': 0.20}
+}
+
+FALLBACK_SECTORS = {
+    'NVDA': 'Technology', 'MSFT': 'Technology', 'AAPL': 'Technology',
+    'GOOGL': 'Technology', 'AMZN': 'Consumer Cyclical', 'ASML': 'Technology',
+    'TSM': 'Technology', 'BMW.DE': 'Consumer Cyclical', 'TTE.PA': 'Energy',
+    'ING': 'Financial Services', 'PFE': 'Healthcare', 'KO': 'Consumer Defensive',
+    'NKE': 'Consumer Cyclical', 'MRVL': 'Technology', 'MU': 'Technology',
+    '000660.KS': 'Technology'
 }
 
 # ==============================================================================
@@ -42,7 +52,6 @@ def clean_percentage(val):
     return val
 
 def get_row(df, possible_keys):
-    """Sucht flexibel nach verschiedenen Schreibweisen in Finanz-DataFrames"""
     if df is None or df.empty:
         return None
     for key in possible_keys:
@@ -74,6 +83,8 @@ def get_turnaround_status(metrics):
         return "🛡️ Trend / Normal"
 
 def get_combined_recommendation(score, turnaround_status):
+    if pd.isna(score):
+        return "🔴 Daten unvollständig"
     if "Fallendes Messer" in turnaround_status:
         return "🟠 Halten (Vorsicht)" if score >= 60 else "🔴 Verkaufen / Fallendes Messer"
     elif "Aktiver Turnaround" in turnaround_status:
@@ -94,12 +105,23 @@ def get_combined_recommendation(score, turnaround_status):
 def fetch_stock_data(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
-        info = ticker.info
+        try:
+            info = ticker.info
+        except Exception:
+            info = {}
+            
+        try:
+            fast_info = ticker.fast_info
+        except Exception:
+            fast_info = {}
+
         hist = ticker.history(period="1y")
         if hist.empty or len(hist) < 30:
             return None
+            
         return {
             'info': info,
+            'fast_info': fast_info,
             'hist': hist,
             'financials': ticker.financials,
             'balance_sheet': ticker.balance_sheet,
@@ -109,20 +131,24 @@ def fetch_stock_data(ticker_symbol):
         return None
 
 # ==============================================================================
-# ADVANCED METRICS CALCULATOR (DIRECT FINANCIALS)
+# ADVANCED METRICS & DATA QUALITY TRACKER
 # ==============================================================================
 
 def calculate_advanced_metrics(data, symbol):
     info = data['info']
+    fast_info = data['fast_info']
     hist = data['hist']
     fin = data['financials']
     bs = data['balance_sheet']
     cf = data['cashflow']
 
     metrics = {}
-    sector = safe_get(info, 'sector', 'Default')
-    if not sector or pd.isna(sector):
-        sector = 'Default'
+    
+    sector = safe_get(info, 'sector')
+    sector_source = "Yahoo Info"
+    if pd.isna(sector) or sector == 'Default':
+        sector = FALLBACK_SECTORS.get(symbol, 'Default')
+        sector_source = "Fallback"
     metrics['sector'] = sector
 
     name = safe_get(info, 'shortName')
@@ -150,35 +176,36 @@ def calculate_advanced_metrics(data, symbol):
     metrics['sma_200'] = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else close.mean()
     metrics['above_sma200'] = current_price > metrics['sma_200']
 
-    # Marktkapitalisierung ermitteln (Info oder Kurs * Shares)
-    market_cap = safe_get(info, 'marketCap')
+    # Marktkapitalisierung
+    market_cap = np.nan
+    try:
+        market_cap = fast_info.get('market_cap', np.nan)
+    except Exception:
+        pass
+    if pd.isna(market_cap):
+        market_cap = safe_get(info, 'marketCap')
     shares = safe_get(info, 'sharesOutstanding')
     if pd.isna(market_cap) and pd.notna(shares) and shares > 0:
         market_cap = current_price * shares
-
     metrics['market_cap'] = market_cap
 
-    # DIREKTE BERECHNUNG AUS BILANZ (Umgeht fehlende Yahoo-Info-Felder)
+    # Bilanzen auslesen
     net_income = get_row(fin, ['Net Income', 'Net Income Common Stockholders', 'NetIncome', 'Net Income From Continuing Operation'])
     revenue = get_row(fin, ['Total Revenue', 'Operating Revenue', 'Revenue'])
     equity = get_row(bs, ['Stockholders Equity', 'Total Stockholder Equity', 'Total Equity Gross Minority Interest', 'Common Stock Equity'])
 
-    # Effektives KGV berechnen
     pe_effective = safe_get(info, 'forwardPE')
     if pd.isna(pe_effective) or pe_effective <= 0:
         pe_effective = safe_get(info, 'trailingPE')
     if (pd.isna(pe_effective) or pe_effective <= 0) and pd.notna(market_cap) and pd.notna(net_income) and net_income > 0:
         pe_effective = market_cap / net_income
-
     metrics['pe_effective'] = pe_effective
 
-    # KUV (Price-to-Sales) direkt berechnen
     ps_ratio = safe_get(info, 'priceToSalesTrailing12Months')
     if (pd.isna(ps_ratio) or ps_ratio <= 0) and pd.notna(market_cap) and pd.notna(revenue) and revenue > 0:
         ps_ratio = market_cap / revenue
     metrics['ps_ratio'] = ps_ratio
 
-    # KBV (Price-to-Book) direkt berechnen
     pb_ratio = safe_get(info, 'priceToBook')
     if (pd.isna(pb_ratio) or pb_ratio <= 0) and pd.notna(market_cap) and pd.notna(equity) and equity > 0:
         pb_ratio = market_cap / equity
@@ -186,16 +213,13 @@ def calculate_advanced_metrics(data, symbol):
 
     metrics['peg_ratio'] = safe_get(info, 'pegRatio')
     
-    # Free Cash Flow Ermittlung
     op_cf = get_row(cf, ['Operating Cash Flow', 'Total Cash From Operating Activities', 'OperatingCashFlow'])
     capex = get_row(cf, ['Capital Expenditure', 'CapEx', 'CapitalExpenditures', 'Purchase Of Property And Equipment'])
-    
     fcf = np.nan
     if pd.notna(op_cf):
         fcf = op_cf + capex if pd.notna(capex) and capex < 0 else (op_cf - capex if pd.notna(capex) else op_cf * 0.8)
     if pd.isna(fcf):
         fcf = safe_get(info, 'freeCashflow')
-        
     metrics['fcf_yield'] = (fcf / market_cap) if (pd.notna(fcf) and pd.notna(market_cap) and market_cap > 0) else np.nan
 
     metrics['roe'] = clean_percentage(safe_get(info, 'returnOnEquity'))
@@ -204,7 +228,6 @@ def calculate_advanced_metrics(data, symbol):
 
     metrics['gross_margin'] = safe_get(info, 'grossMargins')
 
-    # ROIC Berechnung
     if sector != 'Financial Services':
         ebit = get_row(fin, ['EBIT', 'Operating Income', 'OperatingIncome', 'Normalized Income'])
         inc_tax = get_row(fin, ['Tax Provision', 'Income Tax Expense'])
@@ -218,7 +241,6 @@ def calculate_advanced_metrics(data, symbol):
             if pd.notna(inc_tax) and pd.notna(pre_tax) and pre_tax > 0:
                 tax_rate = max(0.10, min(inc_tax / pre_tax, 0.40))
             nopat = ebit * (1 - tax_rate)
-            
             cl = curr_liab if pd.notna(curr_liab) else 0
             c = cash if pd.notna(cash) else 0
             invested_capital = total_assets - cl - c
@@ -228,16 +250,13 @@ def calculate_advanced_metrics(data, symbol):
     else:
         metrics['roic'] = np.nan
 
-    # Net Debt / EBITDA
     if sector != 'Financial Services':
         tot_debt = get_row(bs, ['Total Debt', 'TotalDebt', 'Long Term Debt'])
         cash_eq = get_row(bs, ['Cash And Cash Equivalents', 'Cash Financial', 'CashAndCashEquivalents'])
         ebitda = get_row(fin, ['Normalized EBITDA', 'EBITDA', 'Operating Income'])
-        
         td = tot_debt if pd.notna(tot_debt) else 0
         ce = cash_eq if pd.notna(cash_eq) else 0
         net_debt = td - ce
-        
         if pd.notna(ebitda) and ebitda > 0:
             metrics['net_debt_ebitda'] = net_debt / ebitda
         else:
@@ -248,35 +267,46 @@ def calculate_advanced_metrics(data, symbol):
     metrics['current_ratio'] = safe_get(info, 'currentRatio')
     metrics['turnaround_status'] = get_turnaround_status(metrics)
 
+    # DATENQUALITÄTS-CHECK (Zählt wie viele Kernfelder erfolgreich da sind)
+    core_fields = [
+        metrics['pe_effective'], metrics['ps_ratio'], metrics['fcf_yield'], 
+        metrics['gross_margin'], metrics['market_cap'], metrics['current_ratio']
+    ]
+    if sector != 'Financial Services':
+        core_fields.extend([metrics['roic'], metrics['net_debt_ebitda']])
+    else:
+        core_fields.extend([metrics['roe'], metrics['pb_ratio']])
+        
+    valid_count = sum([1 for f in core_fields if pd.notna(f)])
+    metrics['data_quality'] = round((valid_count / len(core_fields)) * 100)
+
     return metrics
 
 # ==============================================================================
-# SCORING ENGINE (MULTI-METRIC VALUATION)
+# STRICT SCORING ENGINE (NO FAKE DEFAULTS)
 # ==============================================================================
 
 def score_stock_v9(metrics):
     if not metrics:
-        return 0, {'valuation': 50, 'quality': 50, 'risk': 50, 'tech': 50}
+        return np.nan, {'valuation': np.nan, 'quality': np.nan, 'risk': np.nan, 'tech': np.nan}
 
     sector = metrics.get('sector', 'Default')
     weights = SECTOR_WEIGHTS.get(sector, SECTOR_WEIGHTS['Default'])
     scores = {}
 
-    # 1. Valuation Score (Nutz KGV, KUV und PEG kombiniert - springt nie mehr auf Standard 50)
+    # 1. Valuation Score
     v_scores = []
     pe = metrics.get('pe_effective')
     if pd.notna(pe) and pe > 0:
         v_scores.append(np.interp(pe, [5, 12, 20, 35, 70], [100, 90, 70, 25, 0]))
-        
     ps = metrics.get('ps_ratio')
     if pd.notna(ps) and ps > 0:
         v_scores.append(np.interp(ps, [0.5, 1.5, 3.5, 7.0], [100, 85, 45, 0]))
-
     peg = metrics.get('peg_ratio')
     if pd.notna(peg) and peg > 0:
         v_scores.append(np.interp(peg, [0.4, 1.0, 1.8, 3.0], [100, 80, 40, 0]))
     
-    scores['valuation'] = np.mean(v_scores) if v_scores else 50.0
+    scores['valuation'] = np.mean(v_scores) if v_scores else np.nan
 
     # 2. Quality Score
     q_scores = []
@@ -296,7 +326,7 @@ def score_stock_v9(metrics):
     if pd.notna(fcf_y):
         q_scores.append(np.interp(fcf_y, [-0.01, 0.03, 0.06, 0.10], [10, 50, 85, 100]))
         
-    scores['quality'] = np.mean(q_scores) if q_scores else 55.0
+    scores['quality'] = np.mean(q_scores) if q_scores else np.nan
 
     # 3. Risk Score
     r_scores = []
@@ -312,21 +342,31 @@ def score_stock_v9(metrics):
         if pd.notna(cr):
             r_scores.append(np.interp(cr, [0.6, 1.0, 1.5, 2.5], [15, 60, 90, 75]))
             
-    scores['risk'] = np.mean(r_scores) if r_scores else 55.0
+    scores['risk'] = np.mean(r_scores) if r_scores else np.nan
 
     # 4. Tech / Momentum Score
     t_scores = [85 if metrics.get('above_sma200', False) else 30]
     perf_6m = metrics.get('perf_6m')
     if pd.notna(perf_6m):
         t_scores.append(np.interp(perf_6m, [-0.25, 0.0, 0.15, 0.40], [0, 45, 75, 100]))
-    scores['tech'] = np.mean(t_scores) if t_scores else 50.0
+    scores['tech'] = np.mean(t_scores) if t_scores else np.nan
 
-    total_score = (
-        scores['valuation'] * weights['valuation'] +
-        scores['quality'] * weights['quality'] +
-        scores['risk'] * weights['risk'] +
-        scores['tech'] * weights['tech']
-    )
+    # Dynamisches Gewichten ohne Fake-Notanker
+    active_weights = weights.copy()
+    valid_scores = {}
+    for cat in ['valuation', 'quality', 'risk', 'tech']:
+        if pd.notna(scores.get(cat)):
+            valid_scores[cat] = scores[cat]
+        else:
+            active_weights[cat] = 0.0
+
+    total_w = sum(active_weights.values())
+    if total_w <= 0:
+        return np.nan, scores # Keine valide Berechnung möglich
+
+    norm_weights = {k: v / total_w for k, v in active_weights.items()}
+
+    total_score = sum(valid_scores[cat] * norm_weights[cat] for cat in valid_scores)
     return round(total_score, 1), scores
 
 # ==============================================================================
@@ -334,8 +374,8 @@ def score_stock_v9(metrics):
 # ==============================================================================
 
 def main():
-    st.title("📊 Quant-Aktien-Screener V9.7")
-    st.caption("Sektor-adaptives Quant-Scoring mit direkter Bilanz-Bewertungslogik")
+    st.title("📊 Quant-Aktien-Screener V9.9 (Strict & Quality)")
+    st.caption("Echtes Quant-Scoring mit transparenter Datenqualitäts-Prüfung und ohne Fake-Scores")
 
     st.sidebar.header("⚙️ Konfiguration")
     default_tickers = "BMW.DE, NVDA, MSFT, AAPL, GOOGL, AMZN, TTE.PA, ING, PFE, KO, NKE"
@@ -353,7 +393,7 @@ def main():
 
     tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
-    if st.sidebar.button("🚀 Screening starten", type="primary") or "results_v97" not in st.session_state:
+    if st.sidebar.button("🚀 Screening starten", type="primary") or "results_v99" not in st.session_state:
         results = []
         progress_bar = st.progress(0)
         
@@ -371,33 +411,42 @@ def main():
                     'Sektor': metrics['sector'],
                     'Kurs': metrics['current_price'],
                     'Gesamtscore': total_score,
+                    'Datenqualität': f"{metrics['data_quality']}%",
                     'Empfehlung': combined_rec,
                     'Turnaround Status': turnaround_status,
-                    'Valuation': round(sub_scores['valuation'], 1),
-                    'Quality': round(sub_scores['quality'], 1),
-                    'Risk': round(sub_scores['risk'], 1),
-                    'Tech': round(sub_scores['tech'], 1),
+                    'Valuation': round(sub_scores['valuation'], 1) if pd.notna(sub_scores['valuation']) else np.nan,
+                    'Quality': round(sub_scores['quality'], 1) if pd.notna(sub_scores['quality']) else np.nan,
+                    'Risk': round(sub_scores['risk'], 1) if pd.notna(sub_scores['risk']) else np.nan,
+                    'Tech': round(sub_scores['tech'], 1) if pd.notna(sub_scores['tech']) else np.nan,
                     'KGV (Eff)': metrics['pe_effective'],
                     'sub_scores': sub_scores
                 })
             progress_bar.progress((idx + 1) / len(tickers))
         
         progress_bar.empty()
-        st.session_state["results_v97"] = pd.DataFrame(results)
+        st.session_state["results_v99"] = pd.DataFrame(results)
 
-    df_results = st.session_state.get("results_v97", pd.DataFrame())
+    df_results = st.session_state.get("results_v99", pd.DataFrame())
 
     if not df_results.empty:
-        filtered_df = df_results[df_results['Gesamtscore'] >= min_score].sort_values(by="Gesamtscore", ascending=False)
+        # Filtern, aber NaN-Scores explizit behalten oder separat handhaben
+        filtered_df = df_results[(df_results['Gesamtscore'] >= min_score) | (df_results['Gesamtscore'].isna())].sort_values(by="Gesamtscore", ascending=False, na_position='last')
 
-        st.subheader("🏆 Screener Ergebnisse")
+        st.subheader("🏆 Screener Ergebnisse & Datenqualität")
         
-        display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Empfehlung', 'Turnaround Status', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Eff)']
+        display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Datenqualität', 'Empfehlung', 'Turnaround Status', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Eff)']
         
+        # Färbung für unvollständige Daten via Pandas Styler
+        def highlight_missing(row):
+            if pd.isna(row['Gesamtscore']) or int(row['Datenqualität'].replace('%','')) < 70:
+                return ['background-color: rgba(255, 75, 75, 0.15)'] * len(row)
+            return [''] * len(row)
+
         st.dataframe(
-            filtered_df[display_columns],
+            filtered_df[display_columns].style.apply(highlight_missing, axis=1),
             column_config={
                 "Gesamtscore": st.column_config.NumberColumn(format="%.1f"),
+                "Datenqualität": st.column_config.TextColumn("📊 Datenqualität"),
                 "Empfehlung": st.column_config.TextColumn("Kombinierte Empfehlung"),
                 "Turnaround Status": st.column_config.TextColumn("🔄 Turnaround Status"),
                 "Valuation": st.column_config.NumberColumn(format="%.1f"),
@@ -424,18 +473,24 @@ def main():
             with col1:
                 st.markdown(f"### **{stock_data['Name']} ({stock_data['Ticker']})**")
                 st.write(f"**Sektor:** {stock_data['Sektor']}")
+                st.write(f"**Datenqualität:** {stock_data['Datenqualität']}")
                 st.write(f"**Aktueller Kurs:** {stock_data['Kurs']:.2f}")
                 st.write(f"**Empfehlung:** {stock_data['Empfehlung']}")
                 st.write(f"**Turnaround Status:** {stock_data['Turnaround Status']}")
                 
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Gesamtscore", f"{stock_data['Gesamtscore']} / 100")
-                m2.metric("KGV (Eff)", f"{stock_data['KGV (Eff)']:.2f}" if pd.notna(stock_data['KGV (Eff)']) else "N/A")
-                m3.metric("Valuation-Note", f"{stock_data['Valuation']:.1f}")
+                m1.metric("Gesamtscore", f"{stock_data['Gesamtscore']} / 100" if pd.notna(stock_data['Gesamtscore']) else "N/A")
+                m2.metric("KGV (Eff)", f"{stock_data['KGV (Eff)']:.2f}" if pd.notna(stock_data['KGV (Eff)']) else "Fehlt")
+                m3.metric("Valuation-Note", f"{stock_data['Valuation']:.1f}" if pd.notna(stock_data['Valuation']) else "Fehlt")
 
             with col2:
                 categories = ['Valuation', 'Quality', 'Risk', 'Momentum / Tech']
-                values = [sub['valuation'], sub['quality'], sub['risk'], sub['tech']]
+                values = [
+                    sub.get('valuation', 0) if pd.notna(sub.get('valuation')) else 0,
+                    sub.get('quality', 0) if pd.notna(sub.get('quality')) else 0,
+                    sub.get('risk', 0) if pd.notna(sub.get('risk')) else 0,
+                    sub.get('tech', 0) if pd.notna(sub.get('tech')) else 0
+                ]
 
                 fig = go.Figure()
                 fig.add_trace(go.Scatterpolar(
