@@ -106,13 +106,12 @@ def fetch_stock_data(ticker_symbol):
         fcf_yield = fcf / info.get("marketCap", 1) if info.get("marketCap") else 0.04
         hist_growth = info.get("earningsGrowth") or info.get("revenueGrowth") or 0.08
         
-        # Wachstum realistisch korrigieren (Capping zwischen 0% und 18%)
+        # Wachstum realistisch korrigieren (Capping zwischen 1% und 18%)
         proj_growth = max(0.01, min(hist_growth, 0.18))
         discount_rate = 0.09
         terminal_growth = 0.025
 
         # 5-Jahre DCF Projektion
-        dcf_value_per_share = 0
         if current_price > 0 and fcf_yield > 0:
             future_fcf_sum = sum([(1 + proj_growth)**i / (1 + discount_rate)**i for i in range(1, 6)])
             terminal_val = ((1 + proj_growth)**5 * (1 + terminal_growth)) / (discount_rate - terminal_growth)
@@ -348,7 +347,7 @@ if tickers:
             col1, col2 = st.columns([1, 1])
 
             with col1:
-                st.markdown(### f"{stock['Name']} ({stock['Ticker']})")
+                st.markdown(f"### {stock['Name']} ({stock['Ticker']})")
                 st.metric("Gesamt Quant-Score", f"{stock['Total_Score']} / 100", delta=stock['Recommendation'])
                 
                 m1, m2, m3 = st.columns(3)
@@ -390,4 +389,4 @@ if tickers:
                 st.plotly_chart(fig, use_container_width=True)
 
     else:
-        st.warning("Keine Aktien gefunden oder Fehlgeschlagen.")
+        st.warning("Keine Aktien gefunden oder Laden fehlgeschlagen.")
