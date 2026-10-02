@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V10.4",
+    page_title="Aktien-Screener V10.5",
     page_icon="📊",
     layout="wide"
 )
@@ -1010,27 +1010,17 @@ def calculate_pb(
 # FREE CASH FLOW
 # ============================================================
 
-def get_free_cash_flow(
-    info,
-    cashflow
-):
+def get_free_cash_flow(cashflow):
+
+    if (
+        cashflow is None
+        or not isinstance(cashflow, pd.DataFrame)
+        or cashflow.empty
+    ):
+        return np.nan
 
     # --------------------------------------------------------
-    # 1. Yahoo direktes FCF-Feld
-    # --------------------------------------------------------
-
-    direct_fcf = to_number(
-        safe_get(
-            info,
-            'freeCashflow'
-        )
-    )
-
-    if pd.notna(direct_fcf):
-        return direct_fcf
-
-    # --------------------------------------------------------
-    # 2. Direkte Free-Cash-Flow-Zeile
+    # 1. Direkte Free-Cash-Flow-Zeile aus dem Jahresabschluss
     # --------------------------------------------------------
 
     direct_statement_fcf = get_first_valid_row(
@@ -1047,7 +1037,7 @@ def get_free_cash_flow(
         return direct_statement_fcf
 
     # --------------------------------------------------------
-    # 3. Operating CF - CapEx
+    # 2. Operating CF - CapEx
     # --------------------------------------------------------
 
     operating_cf = get_first_valid_row(
@@ -1076,7 +1066,6 @@ def get_free_cash_flow(
         and pd.notna(capex)
     ):
 
-        # Yahoo liefert CapEx normalerweise negativ.
         if capex < 0:
             return operating_cf + capex
 
@@ -1091,7 +1080,7 @@ def get_free_cash_flow(
 
 def calculate_fcf_fair_value(
     fcf,
-    shares_outstanding,
+    market_cap,
     current_price,
     growth_rate
 ):
@@ -1099,20 +1088,41 @@ def calculate_fcf_fair_value(
     if (
         pd.isna(fcf)
         or fcf <= 0
-        or pd.isna(shares_outstanding)
-        or shares_outstanding <= 0
+        or pd.isna(market_cap)
+        or market_cap <= 0
         or pd.isna(current_price)
         or current_price <= 0
     ):
         return np.nan
 
     # --------------------------------------------------------
+    # FCF YIELD
+    # --------------------------------------------------------
+
+    fcf_yield = (
+        fcf / market_cap
+    )
+
+    # Extremwerte sind fast immer ein Daten-/Einheitenproblem.
+    if (
+        pd.isna(fcf_yield)
+        or fcf_yield <= 0
+        or fcf_yield > 0.50
+    ):
+        return np.nan
+
+    # --------------------------------------------------------
     # FCF PER SHARE
+    #
+    # Keine Verwendung von Yahoo-Shares mehr.
+    #
+    # FCF / Market Cap = FCF-Rendite
+    # FCF-Rendite × Kurs = FCF je Aktie
     # --------------------------------------------------------
 
     fcf_per_share = (
-        fcf
-        / shares_outstanding
+        fcf_yield
+        * current_price
     )
 
     if (
@@ -1128,7 +1138,6 @@ def calculate_fcf_fair_value(
     if pd.isna(growth_rate):
         growth_rate = 0.05
 
-    # Conservative cap.
     growth_rate = np.clip(
         growth_rate,
         -0.05,
@@ -1154,7 +1163,6 @@ def calculate_fcf_fair_value(
 
     for year in range(1, 6):
 
-        # Gradual normalization towards terminal growth.
         year_growth = (
             growth_rate
             + (
@@ -1205,10 +1213,6 @@ def calculate_fcf_fair_value(
 
     # --------------------------------------------------------
     # SANITY CHECK
-    # --------------------------------------------------------
-    #
-    # Keine unrealistische harte 4x-Grenze mehr.
-    # Extremwerte werden trotzdem verworfen.
     # --------------------------------------------------------
 
     if (
@@ -1861,7 +1865,6 @@ def extract_metrics(data):
     # --------------------------------------------------------
 
     fcf = get_free_cash_flow(
-        info,
         cashflow
     )
 
@@ -2061,7 +2064,7 @@ def extract_metrics(data):
 
         fcf_fair_value = calculate_fcf_fair_value(
             fcf,
-            shares_outstanding,
+            market_cap,
             current_price,
             dcf_growth
         )
@@ -3266,7 +3269,7 @@ def style_results_table(df):
 # ============================================================
 
 st.title(
-    "📊 Quant-Aktien-Screener V10.4"
+    "📊 Quant-Aktien-Screener V10.5"
 )
 
 st.caption(
