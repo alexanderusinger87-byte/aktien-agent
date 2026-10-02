@@ -423,6 +423,37 @@ def safe_mean(values):
     return float(np.mean(values))
 
 
+def extract_analyst_target(targets, key):
+
+    """
+    Robustly extracts an analyst price target from the different
+    structures yfinance may return (dict, Series or DataFrame).
+    """
+
+    value = np.nan
+
+    if isinstance(targets, dict):
+        value = targets.get(key, np.nan)
+
+    elif isinstance(targets, pd.Series):
+        try:
+            if key in targets.index:
+                value = targets.loc[key]
+        except Exception:
+            pass
+
+    elif isinstance(targets, pd.DataFrame):
+        try:
+            if key in targets.index:
+                value = targets.loc[key].iloc[0]
+            elif key in targets.columns:
+                value = targets[key].iloc[0]
+        except Exception:
+            pass
+
+    return clean_positive(value)
+
+
 # ============================================================
 # COMPANY NAME
 # ============================================================
@@ -1312,22 +1343,25 @@ def calculate_fcf_fair_value(
         return np.nan
 
     # --------------------------------------------------------
-    # DCF BOUND
+    # DCF SANITY RANGE
     #
-    # A simplified DCF based on one historical FCF number and
-    # a generic discount rate must not be allowed to produce
-    # an extreme fair value. It remains useful as a valuation
-    # cross-check, but cannot overwhelm analyst consensus.
+    # IMPORTANT: Do NOT clip a weak DCF to exactly 60% of the
+    # current price. That artificial floor creates exactly -40%
+    # upside and therefore exactly 0 Fair-Value points.
+    #
+    # Instead, an implausibly low/high DCF is treated as an
+    # unusable cross-check (NaN). This is much more honest:
+    # missing/unreliable DCF data must not become a fake score.
     # --------------------------------------------------------
 
     dcf_lower_bound = current_price * 0.60
     dcf_upper_bound = current_price * 1.75
 
-    fair_value = np.clip(
-        fair_value,
-        dcf_lower_bound,
-        dcf_upper_bound
-    )
+    if (
+        fair_value < dcf_lower_bound
+        or fair_value > dcf_upper_bound
+    ):
+        return np.nan
 
     return fair_value
 
@@ -1368,9 +1402,21 @@ def calculate_fair_value_score(
 
     if len(fair_values) == 2:
 
+        analyst_value = next(
+            value
+            for source, value in fair_values
+            if source == 'analyst'
+        )
+
+        fcf_value = next(
+            value
+            for source, value in fair_values
+            if source == 'fcf'
+        )
+
         fair_value_price = (
-            0.75 * fair_values[0][1]
-            + 0.25 * fair_values[1][1]
+            0.75 * analyst_value
+            + 0.25 * fcf_value
         )
 
     else:
@@ -2177,46 +2223,59 @@ def extract_metrics(data):
     analyst_target_low = np.nan
     analyst_target_high = np.nan
 
-    if isinstance(
+    analyst_target_mean = extract_analyst_target(
         analyst_targets,
-        dict
-    ):
+        'mean'
+    )
 
-        analyst_target_mean = clean_positive(
-            safe_get(
-                analyst_targets,
-                'mean'
-            )
-        )
+    analyst_target_median = extract_analyst_target(
+        analyst_targets,
+        'median'
+    )
 
-        analyst_target_median = clean_positive(
-            safe_get(
-                analyst_targets,
-                'median'
-            )
-        )
+    analyst_target_low = extract_analyst_target(
+        analyst_targets,
+        'low'
+    )
 
-        analyst_target_low = clean_positive(
-            safe_get(
-                analyst_targets,
-                'low'
-            )
-        )
+    analyst_target_high = extract_analyst_target(
+        analyst_targets,
+        'high'
+    )
 
-        analyst_target_high = clean_positive(
-            safe_get(
-                analyst_targets,
-                'high'
-            )
-        )
+    # --------------------------------------------------------
+    # FALLBACKS FROM INFO
+    # --------------------------------------------------------
 
-    # Fallback to info
     if pd.isna(analyst_target_mean):
-
         analyst_target_mean = clean_positive(
             safe_get(
                 info,
                 'targetMeanPrice'
+            )
+        )
+
+    if pd.isna(analyst_target_median):
+        analyst_target_median = clean_positive(
+            safe_get(
+                info,
+                'targetMedianPrice'
+            )
+        )
+
+    if pd.isna(analyst_target_low):
+        analyst_target_low = clean_positive(
+            safe_get(
+                info,
+                'targetLowPrice'
+            )
+        )
+
+    if pd.isna(analyst_target_high):
+        analyst_target_high = clean_positive(
+            safe_get(
+                info,
+                'targetHighPrice'
             )
         )
 
