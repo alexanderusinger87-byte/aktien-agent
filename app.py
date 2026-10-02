@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V10.8",
+    page_title="Aktien-Screener V10.9",
     page_icon="📊",
     layout="wide"
 )
@@ -3474,24 +3474,55 @@ def calculate_scores(metrics):
 # RECOMMENDATION
 # ============================================================
 
-def get_recommendation(score):
+def get_recommendation(score, turnaround_status):
 
     if pd.isna(score):
         return "Keine Bewertung"
 
-    if score > 82.5:
-        return "Strong Buy"
+    # --------------------------------------------------------
+    # Base recommendation from the unchanged total score
+    # --------------------------------------------------------
 
-    if score >= 77.5:
-        return "Buy"
+    if score >= 82:
+        base_level = 4
+    elif score >= 74:
+        base_level = 3
+    elif score >= 64:
+        base_level = 2
+    elif score >= 52:
+        base_level = 1
+    else:
+        base_level = 0
 
-    if score >= 70:
-        return "Hold"
+    # --------------------------------------------------------
+    # Turnaround modifier
+    #
+    # Turnaround?  -> one level better
+    # Abwärtstrend -> one level worse
+    # Momentum / Neutral -> unchanged
+    # --------------------------------------------------------
 
-    if score >= 55:
-        return "Reduce / Watch"
+    if turnaround_status == "Turnaround?":
+        modifier = 1
+    elif turnaround_status == "Abwärtstrend":
+        modifier = -1
+    else:
+        modifier = 0
 
-    return "Avoid"
+    recommendation_level = max(
+        0,
+        min(4, base_level + modifier)
+    )
+
+    labels = [
+        "Avoid",
+        "Reduce / Watch",
+        "Hold",
+        "Buy",
+        "Strong Buy"
+    ]
+
+    return labels[recommendation_level]
 
 
 # ============================================================
@@ -3573,11 +3604,11 @@ def get_turnaround_status(metrics):
 def create_radar(scores):
 
     categories = [
-        'Fair Value',
-        'Valuation',
+        'Fair Value Score',
+        'Relative Valuation',
         'Quality',
         'Risk',
-        'Technical'
+        'Technical Trend'
     ]
 
     values = [
@@ -3651,11 +3682,11 @@ def style_results_table(df):
 
     score_columns = [
         'Gesamtscore',
-        'Fair Value',
-        'Valuation',
+        'Fair Value Score',
+        'Relative Valuation',
         'Quality',
         'Risk',
-        'Technical'
+        'Technical Trend'
     ]
 
     completeness_column = [
@@ -3678,11 +3709,11 @@ def style_results_table(df):
         )
         .format({
             'Gesamtscore': '{:.1f}',
-            'Fair Value': '{:.0f}',
-            'Valuation': '{:.0f}',
+            'Fair Value Score': '{:.0f}',
+            'Relative Valuation': '{:.0f}',
             'Quality': '{:.0f}',
             'Risk': '{:.0f}',
-            'Technical': '{:.0f}',
+            'Technical Trend': '{:.0f}',
             'Forward-KGV': '{:.1f}',
             'Datenvollständigkeit (%)': '{:.0f}%'
         })
@@ -3696,12 +3727,12 @@ def style_results_table(df):
 # ============================================================
 
 st.title(
-    "📊 Quant-Aktien-Screener V10.8"
+    "📊 Quant-Aktien-Screener V10.9"
 )
 
 st.caption(
     "Fundamentaler und technischer Aktien-Score "
-    "mit Fair Value, Bewertung, Qualität, Risiko und Markttechnik"
+    "mit Fair Value Score, relativer Bewertung, Qualität, Risiko und technischem Trend"
 )
 
 
@@ -3824,18 +3855,21 @@ if st.button(
                 metrics['data_completeness'],
 
             'Empfehlung':
-                get_recommendation(score),
+                get_recommendation(
+                    score,
+                    get_turnaround_status(metrics)
+                ),
 
             'Turnaround Status':
                 get_turnaround_status(metrics),
 
-            'Fair Value':
+            'Fair Value Score':
                 scores.get(
                     'fair_value',
                     np.nan
                 ),
 
-            'Valuation':
+            'Relative Valuation':
                 scores.get(
                     'valuation',
                     np.nan
@@ -3853,7 +3887,7 @@ if st.button(
                     np.nan
                 ),
 
-            'Technical':
+            'Technical Trend':
                 scores.get(
                     'technical',
                     np.nan
@@ -3891,11 +3925,11 @@ if st.button(
     )
 
     numeric_columns = [
-        'Fair Value',
-        'Valuation',
+        'Fair Value Score',
+        'Relative Valuation',
         'Quality',
         'Risk',
-        'Technical',
+        'Technical Trend',
         'Gesamtscore',
         'Forward-KGV',
         'Datenvollständigkeit (%)'
@@ -3992,7 +4026,7 @@ if st.button(
         with col2:
 
             st.metric(
-                "Fair Value",
+                "Fair Value Score",
                 (
                     f"{detail_scores['fair_value']:.0f}"
                     if pd.notna(
@@ -4005,7 +4039,7 @@ if st.button(
         with col3:
 
             st.metric(
-                "Valuation",
+                "Relative Valuation",
                 (
                     f"{detail_scores['valuation']:.0f}"
                     if pd.notna(
@@ -4043,7 +4077,7 @@ if st.button(
 
         # Technical remains visible below the main cards
         st.metric(
-            "Technical",
+            "Technical Trend",
             (
                 f"{detail_scores['technical']:.0f}"
                 if pd.notna(
@@ -4088,7 +4122,7 @@ if st.button(
                     'Aktueller Kurs',
                     'Marktkapitalisierung',
 
-                    'Fair Value',
+                    'Fair Value Price',
                     'Fair Value Potenzial',
                     'Analysten-Kursziel',
                     'Analysten-Potenzial',
@@ -4304,7 +4338,7 @@ if st.button(
 
                 elif metric in [
                     'Aktueller Kurs',
-                    'Fair Value',
+                    'Fair Value Price',
                     'Analysten-Kursziel',
                     'FCF Fair Value',
                     'Forward EPS',
@@ -4347,7 +4381,7 @@ if st.button(
 
         st.markdown(
             f"**Empfehlung:** "
-            f"{get_recommendation(detail_score)}"
+            f"{get_recommendation(detail_score, get_turnaround_status(detail_metrics))}"
         )
 
         st.markdown(
