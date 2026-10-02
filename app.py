@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V10.7",
+    page_title="Aktien-Screener V10.8",
     page_icon="📊",
     layout="wide"
 )
@@ -1196,22 +1196,12 @@ def calculate_fcf_fair_value(
         fcf / market_cap
     )
 
-    # Extremwerte sind fast immer ein Daten-/Einheitenproblem.
     if (
         pd.isna(fcf_yield)
         or fcf_yield <= 0
         or fcf_yield > 0.50
     ):
         return np.nan
-
-    # --------------------------------------------------------
-    # FCF PER SHARE
-    #
-    # Keine Verwendung von Yahoo-Shares mehr.
-    #
-    # FCF / Market Cap = FCF-Rendite
-    # FCF-Rendite × Kurs = FCF je Aktie
-    # --------------------------------------------------------
 
     fcf_per_share = (
         fcf_yield
@@ -1233,12 +1223,17 @@ def calculate_fcf_fair_value(
 
     growth_rate = np.clip(
         growth_rate,
-        -0.05,
-        0.15
+        -0.03,
+        0.12
     )
 
     # --------------------------------------------------------
     # DCF ASSUMPTIONS
+    #
+    # 9% discount rate and 2.5% terminal growth remain
+    # deliberately unchanged. The key correction is that the
+    # DCF is now treated as a cross-check, not as an unlimited
+    # source of upside.
     # --------------------------------------------------------
 
     discount_rate = 0.09
@@ -1316,6 +1311,24 @@ def calculate_fcf_fair_value(
     ):
         return np.nan
 
+    # --------------------------------------------------------
+    # DCF BOUND
+    #
+    # A simplified DCF based on one historical FCF number and
+    # a generic discount rate must not be allowed to produce
+    # an extreme fair value. It remains useful as a valuation
+    # cross-check, but cannot overwhelm analyst consensus.
+    # --------------------------------------------------------
+
+    dcf_lower_bound = current_price * 0.60
+    dcf_upper_bound = current_price * 1.75
+
+    fair_value = np.clip(
+        fair_value,
+        dcf_lower_bound,
+        dcf_upper_bound
+    )
+
     return fair_value
 
 
@@ -1346,13 +1359,18 @@ def calculate_fair_value_score(
     if not fair_values:
         return np.nan, np.nan
 
+    # --------------------------------------------------------
+    # COMBINATION
+    #
     # Analyst consensus is the primary external reference.
-    # FCF model is a secondary independent cross-check.
+    # DCF is deliberately a secondary cross-check.
+    # --------------------------------------------------------
+
     if len(fair_values) == 2:
 
         fair_value_price = (
-            0.60 * fair_values[0][1]
-            + 0.40 * fair_values[1][1]
+            0.75 * fair_values[0][1]
+            + 0.25 * fair_values[1][1]
         )
 
     else:
@@ -1371,6 +1389,13 @@ def calculate_fair_value_score(
         - 1
     )
 
+    # --------------------------------------------------------
+    # FAIR VALUE SCORE
+    #
+    # More conservative around 0% and moderate upside.
+    # 100 points require a very substantial valuation buffer.
+    # --------------------------------------------------------
+
     fair_value_score = np.interp(
         upside,
         [
@@ -1380,13 +1405,13 @@ def calculate_fair_value_score(
             0.10,
             0.25,
             0.50,
-            1.00
+            0.75
         ],
         [
             0,
             15,
             40,
-            55,
+            58,
             75,
             90,
             100
@@ -2199,23 +2224,50 @@ def extract_metrics(data):
     # FCF FAIR VALUE
     # --------------------------------------------------------
 
-    fcf_growth_inputs = []
+    # --------------------------------------------------------
+    # DCF GROWTH
+    #
+    # Revenue growth gets slightly more weight than earnings
+    # growth because EPS/net-income growth can be strongly
+    # distorted by buybacks, margins and one-off effects.
+    # Growth is intentionally capped more conservatively than
+    # the previous model.
+    # --------------------------------------------------------
 
-    if pd.notna(earnings_growth):
-        fcf_growth_inputs.append(
-            earnings_growth
-        )
+    growth_inputs = []
 
     if pd.notna(revenue_growth):
-        fcf_growth_inputs.append(
-            revenue_growth
+        growth_inputs.append(
+            (revenue_growth, 0.60)
         )
 
-    dcf_growth = (
-        np.mean(fcf_growth_inputs)
-        if fcf_growth_inputs
-        else 0.05
-    )
+    if pd.notna(earnings_growth):
+        growth_inputs.append(
+            (earnings_growth, 0.40)
+        )
+
+    if growth_inputs:
+        weighted_growth = (
+            sum(
+                value * weight
+                for value, weight
+                in growth_inputs
+            )
+            / sum(
+                weight
+                for _, weight
+                in growth_inputs
+            )
+        )
+
+        dcf_growth = np.clip(
+            weighted_growth,
+            -0.03,
+            0.12
+        )
+
+    else:
+        dcf_growth = 0.05
 
     fcf_fair_value = np.nan
 
@@ -2885,7 +2937,7 @@ def calculate_scores(metrics):
     risk_components = []
 
     # --------------------------------------------------------
-    # 1. FINANCIAL STRENGTH (35%)
+    # 1. FINANCIAL STRENGTH (40%)
     # --------------------------------------------------------
 
     financial_components = []
@@ -3012,12 +3064,12 @@ def calculate_scores(metrics):
             risk_components.append(
                 (
                     financial_score,
-                    0.35
+                    0.40
                 )
             )
 
     # --------------------------------------------------------
-    # 2. HISTORICAL VOLATILITY (25%)
+    # 2. HISTORICAL VOLATILITY (15%)
     # --------------------------------------------------------
 
     annualized_volatility = metrics.get(
@@ -3035,12 +3087,12 @@ def calculate_scores(metrics):
         risk_components.append(
             (
                 volatility_score,
-                0.25
+                0.15
             )
         )
 
     # --------------------------------------------------------
-    # 3. MAXIMUM DRAWDOWN (20%)
+    # 3. MAXIMUM DRAWDOWN (15%)
     # --------------------------------------------------------
 
     max_drawdown = metrics.get(
@@ -3058,12 +3110,12 @@ def calculate_scores(metrics):
         risk_components.append(
             (
                 drawdown_score,
-                0.20
+                0.15
             )
         )
 
     # --------------------------------------------------------
-    # 4. BUSINESS STABILITY (20%)
+    # 4. BUSINESS STABILITY (30%)
     # --------------------------------------------------------
 
     stability_components = []
@@ -3130,7 +3182,7 @@ def calculate_scores(metrics):
             risk_components.append(
                 (
                     stability_score,
-                    0.20
+                    0.30
                 )
             )
 
@@ -3585,7 +3637,7 @@ def style_results_table(df):
 # ============================================================
 
 st.title(
-    "📊 Quant-Aktien-Screener V10.7"
+    "📊 Quant-Aktien-Screener V10.8"
 )
 
 st.caption(
