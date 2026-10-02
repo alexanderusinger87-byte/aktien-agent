@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 
 
 # ============================================================
@@ -10,23 +9,41 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V10.9",
+    page_title="Aktien-Screener V11.0",
     page_icon="📊",
     layout="wide"
 )
 
 
 # ============================================================
-# FIXED SCORE WEIGHTS
+# INITIAL SCORE WEIGHTS
 # ============================================================
 
-SCORE_WEIGHTS = {
+INITIAL_SCORE_WEIGHTS = {
     'fair_value': 0.25,
     'valuation': 0.20,
     'quality': 0.30,
     'risk': 0.15,
     'technical': 0.10
 }
+
+
+# ============================================================
+# SESSION STATE – USER WEIGHTS
+# ============================================================
+
+if 'score_weights' not in st.session_state:
+
+    st.session_state.score_weights = (
+        INITIAL_SCORE_WEIGHTS.copy()
+    )
+
+
+def reset_score_weights():
+
+    st.session_state.score_weights = (
+        INITIAL_SCORE_WEIGHTS.copy()
+    )
 
 
 # ============================================================
@@ -248,11 +265,6 @@ def get_row(df, possible_keys):
 
 def get_first_valid_row(df, possible_keys):
 
-    """
-    Liefert den aktuellsten verfügbaren Wert einer der
-    angegebenen Zeilen aus einem Yahoo-Financial-Statement.
-    """
-
     if (
         df is None
         or not isinstance(df, pd.DataFrame)
@@ -290,12 +302,6 @@ def get_first_valid_row(df, possible_keys):
 
 
 def get_numeric_series(df, possible_keys):
-
-    """
-    Liefert die komplette numerische Zeitreihe der ersten
-    gefundenen Finanzzeile. Die Reihenfolge wird chronologisch
-    sortiert, damit daraus Jahreswachstum berechnet werden kann.
-    """
 
     if (
         df is None
@@ -424,11 +430,6 @@ def safe_mean(values):
 
 
 def extract_analyst_target(targets, key):
-
-    """
-    Robustly extracts an analyst price target from the different
-    structures yfinance may return (dict, Series or DataFrame).
-    """
 
     value = np.nan
 
@@ -560,10 +561,6 @@ def fetch_stock_data(ticker_symbol):
             ticker_symbol
         )
 
-        # ----------------------------------------------------
-        # INFO
-        # ----------------------------------------------------
-
         try:
             info = dict(
                 ticker.info
@@ -571,20 +568,12 @@ def fetch_stock_data(ticker_symbol):
         except Exception:
             info = {}
 
-        # ----------------------------------------------------
-        # FAST INFO
-        # ----------------------------------------------------
-
         try:
             fast_info = dict(
                 ticker.fast_info
             )
         except Exception:
             fast_info = {}
-
-        # ----------------------------------------------------
-        # COMPANY NAME SEARCH
-        # ----------------------------------------------------
 
         search_quotes = []
 
@@ -608,10 +597,6 @@ def fetch_stock_data(ticker_symbol):
 
             search_quotes = []
 
-        # ----------------------------------------------------
-        # ANALYST PRICE TARGETS
-        # ----------------------------------------------------
-
         try:
 
             analyst_targets = dict(
@@ -626,10 +611,6 @@ def fetch_stock_data(ticker_symbol):
                 )
             except Exception:
                 analyst_targets = {}
-
-        # ----------------------------------------------------
-        # EARNINGS ESTIMATES
-        # ----------------------------------------------------
 
         try:
 
@@ -646,10 +627,6 @@ def fetch_stock_data(ticker_symbol):
             except Exception:
                 earnings_estimate = pd.DataFrame()
 
-        # ----------------------------------------------------
-        # REVENUE ESTIMATES
-        # ----------------------------------------------------
-
         try:
 
             revenue_estimate = (
@@ -665,10 +642,6 @@ def fetch_stock_data(ticker_symbol):
             except Exception:
                 revenue_estimate = pd.DataFrame()
 
-        # ----------------------------------------------------
-        # GROWTH ESTIMATES
-        # ----------------------------------------------------
-
         try:
 
             growth_estimates = (
@@ -683,10 +656,6 @@ def fetch_stock_data(ticker_symbol):
                 )
             except Exception:
                 growth_estimates = pd.DataFrame()
-
-        # ----------------------------------------------------
-        # HISTORY
-        # ----------------------------------------------------
 
         try:
 
@@ -705,10 +674,6 @@ def fetch_stock_data(ticker_symbol):
         ):
             return None
 
-        # ----------------------------------------------------
-        # INCOME STATEMENT
-        # ----------------------------------------------------
-
         try:
 
             financials = ticker.get_income_stmt(
@@ -722,10 +687,6 @@ def fetch_stock_data(ticker_symbol):
             except Exception:
                 financials = pd.DataFrame()
 
-        # ----------------------------------------------------
-        # BALANCE SHEET
-        # ----------------------------------------------------
-
         try:
 
             balance_sheet = ticker.get_balance_sheet(
@@ -738,10 +699,6 @@ def fetch_stock_data(ticker_symbol):
                 balance_sheet = ticker.balance_sheet
             except Exception:
                 balance_sheet = pd.DataFrame()
-
-        # ----------------------------------------------------
-        # CASH FLOW
-        # ----------------------------------------------------
 
         try:
 
@@ -890,10 +847,6 @@ def get_shares_outstanding(
     current_price
 ):
 
-    # --------------------------------------------------------
-    # 1. Direkte Yahoo-Angabe
-    # --------------------------------------------------------
-
     for key in [
         'sharesOutstanding',
         'impliedSharesOutstanding'
@@ -912,10 +865,6 @@ def get_shares_outstanding(
         ):
             return value
 
-    # --------------------------------------------------------
-    # 2. Fast Info
-    # --------------------------------------------------------
-
     for key in [
         'shares',
         'sharesOutstanding'
@@ -933,10 +882,6 @@ def get_shares_outstanding(
             and value > 0
         ):
             return value
-
-    # --------------------------------------------------------
-    # 3. Fallback über Marktkapitalisierung / Kurs
-    # --------------------------------------------------------
 
     if (
         pd.notna(market_cap)
@@ -1143,10 +1088,6 @@ def get_free_cash_flow(cashflow):
     ):
         return np.nan
 
-    # --------------------------------------------------------
-    # 1. Direkte Free-Cash-Flow-Zeile aus dem Jahresabschluss
-    # --------------------------------------------------------
-
     direct_statement_fcf = get_first_valid_row(
         cashflow,
         [
@@ -1159,10 +1100,6 @@ def get_free_cash_flow(cashflow):
 
     if pd.notna(direct_statement_fcf):
         return direct_statement_fcf
-
-    # --------------------------------------------------------
-    # 2. Operating CF - CapEx
-    # --------------------------------------------------------
 
     operating_cf = get_first_valid_row(
         cashflow,
@@ -1219,10 +1156,6 @@ def calculate_fcf_fair_value(
     ):
         return np.nan
 
-    # --------------------------------------------------------
-    # FCF YIELD
-    # --------------------------------------------------------
-
     fcf_yield = (
         fcf / market_cap
     )
@@ -1245,10 +1178,6 @@ def calculate_fcf_fair_value(
     ):
         return np.nan
 
-    # --------------------------------------------------------
-    # GROWTH
-    # --------------------------------------------------------
-
     if pd.isna(growth_rate):
         growth_rate = 0.05
 
@@ -1258,24 +1187,11 @@ def calculate_fcf_fair_value(
         0.12
     )
 
-    # --------------------------------------------------------
-    # DCF ASSUMPTIONS
-    #
-    # 9% discount rate and 2.5% terminal growth remain
-    # deliberately unchanged. The key correction is that the
-    # DCF is now treated as a cross-check, not as an unlimited
-    # source of upside.
-    # --------------------------------------------------------
-
     discount_rate = 0.09
     terminal_growth = 0.025
 
     if terminal_growth >= discount_rate:
         return np.nan
-
-    # --------------------------------------------------------
-    # 5-YEAR FCF PROJECTION
-    # --------------------------------------------------------
 
     pv_fcf = 0.0
     projected_fcf = fcf_per_share
@@ -1304,10 +1220,6 @@ def calculate_fcf_fair_value(
             )
         )
 
-    # --------------------------------------------------------
-    # TERMINAL VALUE
-    # --------------------------------------------------------
-
     terminal_value = (
         projected_fcf
         * (1 + terminal_growth)
@@ -1330,10 +1242,6 @@ def calculate_fcf_fair_value(
         + pv_terminal
     )
 
-    # --------------------------------------------------------
-    # SANITY CHECK
-    # --------------------------------------------------------
-
     if (
         pd.isna(fair_value)
         or fair_value <= 0
@@ -1341,18 +1249,6 @@ def calculate_fcf_fair_value(
         or fair_value < current_price * 0.05
     ):
         return np.nan
-
-    # --------------------------------------------------------
-    # DCF SANITY RANGE
-    #
-    # IMPORTANT: Do NOT clip a weak DCF to exactly 60% of the
-    # current price. That artificial floor creates exactly -40%
-    # upside and therefore exactly 0 Fair-Value points.
-    #
-    # Instead, an implausibly low/high DCF is treated as an
-    # unusable cross-check (NaN). This is much more honest:
-    # missing/unreliable DCF data must not become a fake score.
-    # --------------------------------------------------------
 
     dcf_lower_bound = current_price * 0.60
     dcf_upper_bound = current_price * 1.75
@@ -1393,13 +1289,6 @@ def calculate_fair_value_score(
     if not fair_values:
         return np.nan, np.nan
 
-    # --------------------------------------------------------
-    # COMBINATION
-    #
-    # Analyst consensus is the primary external reference.
-    # DCF is deliberately a secondary cross-check.
-    # --------------------------------------------------------
-
     if len(fair_values) == 2:
 
         analyst_value = next(
@@ -1434,13 +1323,6 @@ def calculate_fair_value_score(
         / current_price
         - 1
     )
-
-    # --------------------------------------------------------
-    # FAIR VALUE SCORE
-    #
-    # More conservative around 0% and moderate upside.
-    # 100 points require a very substantial valuation buffer.
-    # --------------------------------------------------------
 
     fair_value_score = np.interp(
         upside,
@@ -1600,10 +1482,6 @@ def extract_metrics(data):
 
     ticker_symbol = data['ticker']
 
-    # --------------------------------------------------------
-    # BASIC
-    # --------------------------------------------------------
-
     market_cap = get_market_cap(
         info,
         fast_info
@@ -1632,10 +1510,6 @@ def extract_metrics(data):
         search_quotes,
         ticker_symbol
     )
-
-    # --------------------------------------------------------
-    # INCOME
-    # --------------------------------------------------------
 
     revenue = get_row(
         financials,
@@ -1666,10 +1540,6 @@ def extract_metrics(data):
         financials,
         TAX_KEYS
     )
-
-    # --------------------------------------------------------
-    # BALANCE SHEET
-    # --------------------------------------------------------
 
     total_assets = get_row(
         balance_sheet,
@@ -1710,10 +1580,6 @@ def extract_metrics(data):
         ]
     )
 
-    # --------------------------------------------------------
-    # EPS / GROWTH ESTIMATES
-    # --------------------------------------------------------
-
     trailing_eps = to_number(
         safe_get(
             info,
@@ -1742,7 +1608,6 @@ def extract_metrics(data):
         )
     )
 
-    # Analyst EPS growth fallback
     estimate_growth = get_estimate_value(
         earnings_estimate,
         '+1y',
@@ -1757,7 +1622,6 @@ def extract_metrics(data):
     if pd.isna(earnings_growth):
         earnings_growth = estimate_growth
 
-    # Analyst revenue growth fallback
     estimate_revenue_growth = get_estimate_value(
         revenue_estimate,
         '+1y',
@@ -1772,7 +1636,6 @@ def extract_metrics(data):
     if pd.isna(revenue_growth):
         revenue_growth = estimate_revenue_growth
 
-    # Longer-term growth estimate fallback
     long_term_growth = np.nan
 
     try:
@@ -1800,10 +1663,6 @@ def extract_metrics(data):
     if pd.isna(long_term_growth):
         long_term_growth = earnings_growth
 
-    # --------------------------------------------------------
-    # VALUATION
-    # --------------------------------------------------------
-
     trailing_pe = calculate_trailing_pe(
         info,
         market_cap,
@@ -1827,8 +1686,6 @@ def extract_metrics(data):
         equity
     )
 
-    # Forward PEG calculated from forward PE
-    # and expected EPS growth.
     forward_peg = np.nan
 
     if (
@@ -1849,7 +1706,6 @@ def extract_metrics(data):
                 / growth_percent
             )
 
-    # Yahoo PEG fallback
     if pd.isna(forward_peg):
 
         yahoo_peg = clean_positive(
@@ -1861,10 +1717,6 @@ def extract_metrics(data):
 
         if pd.notna(yahoo_peg):
             forward_peg = yahoo_peg
-
-    # --------------------------------------------------------
-    # GROSS MARGIN
-    # --------------------------------------------------------
 
     gross_margin = clean_percentage(
         safe_get(
@@ -1894,10 +1746,6 @@ def extract_metrics(data):
                 / revenue
             )
 
-    # --------------------------------------------------------
-    # NET MARGIN
-    # --------------------------------------------------------
-
     net_margin = np.nan
 
     if (
@@ -1910,10 +1758,6 @@ def extract_metrics(data):
             net_income
             / revenue
         )
-
-    # --------------------------------------------------------
-    # ROE
-    # --------------------------------------------------------
 
     roe = clean_percentage(
         safe_get(
@@ -1934,10 +1778,6 @@ def extract_metrics(data):
                 net_income
                 / equity
             )
-
-    # --------------------------------------------------------
-    # ROIC
-    # --------------------------------------------------------
 
     roic = np.nan
 
@@ -1999,10 +1839,6 @@ def extract_metrics(data):
 
                     roic = calculated_roic
 
-    # --------------------------------------------------------
-    # CASH FLOW
-    # --------------------------------------------------------
-
     operating_cf = get_first_valid_row(
         cashflow,
         [
@@ -2023,10 +1859,6 @@ def extract_metrics(data):
             'Purchase Of Property And Equipment'
         ]
     )
-
-    # --------------------------------------------------------
-    # FREE CASH FLOW
-    # --------------------------------------------------------
 
     fcf = get_free_cash_flow(
         cashflow
@@ -2057,10 +1889,6 @@ def extract_metrics(data):
             / revenue
         )
 
-    # --------------------------------------------------------
-    # NET DEBT / EBITDA
-    # --------------------------------------------------------
-
     net_debt_ebitda = np.nan
 
     if sector != 'Financial Services':
@@ -2081,10 +1909,6 @@ def extract_metrics(data):
                 net_debt
                 / ebitda
             )
-
-    # --------------------------------------------------------
-    # DEBT / EQUITY
-    # --------------------------------------------------------
 
     debt_to_equity = clean_positive(
         safe_get(
@@ -2107,10 +1931,6 @@ def extract_metrics(data):
                 * 100
             )
 
-    # --------------------------------------------------------
-    # CASH / DEBT
-    # --------------------------------------------------------
-
     cash_to_debt = np.nan
 
     if (
@@ -2123,10 +1943,6 @@ def extract_metrics(data):
             cash
             / total_debt
         )
-
-    # --------------------------------------------------------
-    # CURRENT RATIO
-    # --------------------------------------------------------
 
     current_ratio = clean_positive(
         safe_get(
@@ -2147,10 +1963,6 @@ def extract_metrics(data):
                 current_assets
                 / current_liabilities
             )
-
-    # --------------------------------------------------------
-    # RISK MARKET / BUSINESS STABILITY
-    # --------------------------------------------------------
 
     annualized_volatility = np.nan
     max_drawdown = np.nan
@@ -2214,15 +2026,6 @@ def extract_metrics(data):
         historical_net_income
     )
 
-    # --------------------------------------------------------
-    # ANALYST TARGET
-    # --------------------------------------------------------
-
-    analyst_target_mean = np.nan
-    analyst_target_median = np.nan
-    analyst_target_low = np.nan
-    analyst_target_high = np.nan
-
     analyst_target_mean = extract_analyst_target(
         analyst_targets,
         'mean'
@@ -2242,10 +2045,6 @@ def extract_metrics(data):
         analyst_targets,
         'high'
     )
-
-    # --------------------------------------------------------
-    # FALLBACKS FROM INFO
-    # --------------------------------------------------------
 
     if pd.isna(analyst_target_mean):
         analyst_target_mean = clean_positive(
@@ -2279,20 +2078,6 @@ def extract_metrics(data):
             )
         )
 
-    # --------------------------------------------------------
-    # FCF FAIR VALUE
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-    # DCF GROWTH
-    #
-    # Revenue growth gets slightly more weight than earnings
-    # growth because EPS/net-income growth can be strongly
-    # distorted by buybacks, margins and one-off effects.
-    # Growth is intentionally capped more conservatively than
-    # the previous model.
-    # --------------------------------------------------------
-
     growth_inputs = []
 
     if pd.notna(revenue_growth):
@@ -2306,16 +2091,15 @@ def extract_metrics(data):
         )
 
     if growth_inputs:
+
         weighted_growth = (
             sum(
                 value * weight
-                for value, weight
-                in growth_inputs
+                for value, weight in growth_inputs
             )
             / sum(
                 weight
-                for _, weight
-                in growth_inputs
+                for _, weight in growth_inputs
             )
         )
 
@@ -2326,6 +2110,7 @@ def extract_metrics(data):
         )
 
     else:
+
         dcf_growth = 0.05
 
     fcf_fair_value = np.nan
@@ -2338,10 +2123,6 @@ def extract_metrics(data):
             current_price,
             dcf_growth
         )
-
-    # --------------------------------------------------------
-    # COMBINED FAIR VALUE
-    # --------------------------------------------------------
 
     fair_value_price, fair_value_score = (
         calculate_fair_value_score(
@@ -2378,10 +2159,6 @@ def extract_metrics(data):
             / current_price
             - 1
         )
-
-    # --------------------------------------------------------
-    # TECHNICAL
-    # --------------------------------------------------------
 
     above_sma200 = np.nan
     above_sma50 = np.nan
@@ -2570,10 +2347,6 @@ def extract_metrics(data):
         * 100
     )
 
-    # ========================================================
-    # RETURN
-    # ========================================================
-
     return {
 
         'ticker': ticker_symbol,
@@ -2664,7 +2437,15 @@ def extract_metrics(data):
 # SCORING
 # ============================================================
 
-def calculate_scores(metrics):
+def calculate_scores(
+    metrics,
+    score_weights=None
+):
+
+    if score_weights is None:
+        score_weights = (
+            INITIAL_SCORE_WEIGHTS.copy()
+        )
 
     sector = metrics.get(
         'sector',
@@ -2699,7 +2480,6 @@ def calculate_scores(metrics):
 
     valuation_components = []
 
-    # Forward PE
     forward_pe = metrics.get(
         'forward_pe'
     )
@@ -2720,7 +2500,6 @@ def calculate_scores(metrics):
             )
         )
 
-    # Trailing PE
     trailing_pe = metrics.get(
         'trailing_pe'
     )
@@ -2741,7 +2520,6 @@ def calculate_scores(metrics):
             )
         )
 
-    # Forward PEG
     forward_peg = metrics.get(
         'forward_peg'
     )
@@ -2835,7 +2613,6 @@ def calculate_scores(metrics):
 
     if sector == 'Financial Services':
 
-        # ROE
         roe = metrics.get(
             'roe'
         )
@@ -2853,7 +2630,6 @@ def calculate_scores(metrics):
                 )
             )
 
-        # Net margin
         net_margin = metrics.get(
             'net_margin'
         )
@@ -2873,7 +2649,6 @@ def calculate_scores(metrics):
 
     else:
 
-        # ROIC
         roic = metrics.get(
             'roic'
         )
@@ -2891,7 +2666,6 @@ def calculate_scores(metrics):
                 )
             )
 
-        # Gross margin
         gross_margin = metrics.get(
             'gross_margin'
         )
@@ -2909,7 +2683,6 @@ def calculate_scores(metrics):
                 )
             )
 
-        # FCF margin
         fcf_margin = metrics.get(
             'fcf_margin'
         )
@@ -2927,7 +2700,6 @@ def calculate_scores(metrics):
                 )
             )
 
-    # Expected earnings growth
     earnings_growth = metrics.get(
         'earnings_growth'
     )
@@ -2945,7 +2717,6 @@ def calculate_scores(metrics):
             )
         )
 
-    # Expected revenue growth
     revenue_growth = metrics.get(
         'revenue_growth'
     )
@@ -2987,17 +2758,8 @@ def calculate_scores(metrics):
     # ========================================================
     # RISK
     # ========================================================
-    #
-    # Risk = financial strength + market risk + drawdown +
-    # business stability. 100 = lower risk, 0 = higher risk.
-    # Valuation is deliberately excluded because it is already
-    # represented by Fair Value / Valuation.
 
     risk_components = []
-
-    # --------------------------------------------------------
-    # 1. FINANCIAL STRENGTH (40%)
-    # --------------------------------------------------------
 
     financial_components = []
 
@@ -3127,10 +2889,6 @@ def calculate_scores(metrics):
                 )
             )
 
-    # --------------------------------------------------------
-    # 2. HISTORICAL VOLATILITY (15%)
-    # --------------------------------------------------------
-
     annualized_volatility = metrics.get(
         'annualized_volatility'
     )
@@ -3150,10 +2908,6 @@ def calculate_scores(metrics):
             )
         )
 
-    # --------------------------------------------------------
-    # 3. MAXIMUM DRAWDOWN (15%)
-    # --------------------------------------------------------
-
     max_drawdown = metrics.get(
         'max_drawdown'
     )
@@ -3172,10 +2926,6 @@ def calculate_scores(metrics):
                 0.15
             )
         )
-
-    # --------------------------------------------------------
-    # 4. BUSINESS STABILITY (30%)
-    # --------------------------------------------------------
 
     stability_components = []
 
@@ -3272,10 +3022,6 @@ def calculate_scores(metrics):
 
     technical_components = []
 
-    # --------------------------------------------------------
-    # SMA200 / long-term trend
-    # --------------------------------------------------------
-
     above_sma200 = metrics.get(
         'above_sma200'
     )
@@ -3288,10 +3034,6 @@ def calculate_scores(metrics):
                 0.25
             )
         )
-
-    # --------------------------------------------------------
-    # 6M momentum
-    # --------------------------------------------------------
 
     perf_6m = metrics.get(
         'perf_6m'
@@ -3309,10 +3051,6 @@ def calculate_scores(metrics):
                 0.25
             )
         )
-
-    # --------------------------------------------------------
-    # RSI
-    # --------------------------------------------------------
 
     rsi = metrics.get(
         'rsi14'
@@ -3332,10 +3070,6 @@ def calculate_scores(metrics):
                 0.20
             )
         )
-
-    # --------------------------------------------------------
-    # MACD
-    # --------------------------------------------------------
 
     macd = metrics.get(
         'macd'
@@ -3382,10 +3116,6 @@ def calculate_scores(metrics):
             )
         )
 
-    # --------------------------------------------------------
-    # SMA50 vs SMA200
-    # --------------------------------------------------------
-
     sma50 = metrics.get(
         'sma50'
     )
@@ -3430,11 +3160,25 @@ def calculate_scores(metrics):
     # ========================================================
     # FINAL SCORE
     # ========================================================
+    #
+    # IMPORTANT:
+    # The individual category scores above are unchanged.
+    # Only the external category weights are configurable.
+    #
+    # The entered weights are normalized to 100%.
+    # Missing category scores retain the existing 50-point
+    # fallback exactly as before.
+    # ========================================================
 
     available_weight = 0.0
     weighted_score = 0.0
 
-    for category, weight in SCORE_WEIGHTS.items():
+    for category in INITIAL_SCORE_WEIGHTS.keys():
+
+        weight = score_weights.get(
+            category,
+            0.0
+        )
 
         value = scores.get(
             category,
@@ -3479,10 +3223,6 @@ def get_recommendation(score, turnaround_status):
     if pd.isna(score):
         return "Keine Bewertung"
 
-    # --------------------------------------------------------
-    # Base recommendation from the unchanged total score
-    # --------------------------------------------------------
-
     if score >= 82:
         base_level = 4
     elif score >= 74:
@@ -3493,14 +3233,6 @@ def get_recommendation(score, turnaround_status):
         base_level = 1
     else:
         base_level = 0
-
-    # --------------------------------------------------------
-    # Turnaround modifier
-    #
-    # Turnaround?  -> one level better
-    # Abwärtstrend -> one level worse
-    # Momentum / Neutral -> unchanged
-    # --------------------------------------------------------
 
     if turnaround_status == "Turnaround?":
         modifier = 1
@@ -3598,83 +3330,6 @@ def get_turnaround_status(metrics):
 
 
 # ============================================================
-# RADAR
-# ============================================================
-
-def create_radar(scores):
-
-    categories = [
-        'Fair Value Score',
-        'Relative Valuation',
-        'Quality',
-        'Risk',
-        'Technical Trend'
-    ]
-
-    values = [
-        scores.get(
-            'fair_value',
-            np.nan
-        ),
-        scores.get(
-            'valuation',
-            np.nan
-        ),
-        scores.get(
-            'quality',
-            np.nan
-        ),
-        scores.get(
-            'risk',
-            np.nan
-        ),
-        scores.get(
-            'technical',
-            np.nan
-        )
-    ]
-
-    categories_closed = (
-        categories
-        + [categories[0]]
-    )
-
-    values_closed = (
-        values
-        + [values[0]]
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatterpolar(
-            r=values_closed,
-            theta=categories_closed,
-            fill='toself',
-            name='Score'
-        )
-    )
-
-    fig.update_layout(
-        polar=dict(
-            radialaxis=dict(
-                visible=True,
-                range=[0, 100]
-            )
-        ),
-        showlegend=False,
-        margin=dict(
-            l=30,
-            r=30,
-            t=30,
-            b=30
-        )
-    )
-
-    return fig
-
-
-# ============================================================
 # TABLE COLORING
 # ============================================================
 
@@ -3727,7 +3382,7 @@ def style_results_table(df):
 # ============================================================
 
 st.title(
-    "📊 Quant-Aktien-Screener V10.9"
+    "📊 Quant-Aktien-Screener V11.0"
 )
 
 st.caption(
@@ -3770,6 +3425,111 @@ if st.sidebar.button(
 
 
 # ============================================================
+# WEIGHT CONTROLS
+# ============================================================
+
+st.sidebar.markdown("---")
+
+st.sidebar.subheader(
+    "⚖️ Score-Gewichtung"
+)
+
+st.sidebar.caption(
+    "Die Kategorie-Scores bleiben unverändert. "
+    "Nur deren Gewichtung im Gesamtscore wird angepasst."
+)
+
+weight_labels = {
+    'fair_value': 'Fair Value',
+    'valuation': 'Relative Valuation',
+    'quality': 'Quality',
+    'risk': 'Risk',
+    'technical': 'Technical Trend'
+}
+
+for key, label in weight_labels.items():
+
+    current_value = (
+        st.session_state.score_weights[key]
+        * 100
+    )
+
+    new_value = st.sidebar.number_input(
+        label,
+        min_value=0.0,
+        max_value=100.0,
+        value=float(current_value),
+        step=1.0,
+        key=f"weight_{key}"
+    )
+
+    st.session_state.score_weights[key] = (
+        new_value / 100.0
+    )
+
+
+weight_sum = sum(
+    st.session_state.score_weights.values()
+)
+
+if weight_sum <= 0:
+
+    st.sidebar.error(
+        "Mindestens eine Gewichtung muss > 0 sein."
+    )
+
+else:
+
+    if abs(weight_sum - 1.0) > 0.0001:
+
+        st.sidebar.info(
+            f"Summe: {weight_sum * 100:.0f}% "
+            "→ wird automatisch auf 100% normalisiert."
+        )
+
+    else:
+
+        st.sidebar.success(
+            "Summe: 100%"
+        )
+
+
+if st.sidebar.button(
+    "🔄 Reset",
+    use_container_width=True
+):
+
+    reset_score_weights()
+    st.rerun()
+
+
+# ============================================================
+# NORMALIZED WEIGHTS
+# ============================================================
+
+raw_weights = (
+    st.session_state.score_weights.copy()
+)
+
+raw_weight_sum = sum(
+    raw_weights.values()
+)
+
+if raw_weight_sum > 0:
+
+    active_weights = {
+        key: value / raw_weight_sum
+        for key, value in raw_weights.items()
+    }
+
+else:
+
+    active_weights = (
+        INITIAL_SCORE_WEIGHTS.copy()
+    )
+
+
+# ============================================================
 # ANALYSE
 # ============================================================
 
@@ -3796,10 +3556,6 @@ if st.button(
 
     results = []
 
-    # --------------------------------------------------------
-    # FETCH + SCORE
-    # --------------------------------------------------------
-
     for i, ticker_symbol in enumerate(tickers):
 
         status_text.write(
@@ -3823,7 +3579,8 @@ if st.button(
         )
 
         score, scores = calculate_scores(
-            metrics
+            metrics,
+            active_weights
         )
 
         if (
@@ -3965,11 +3722,11 @@ if st.button(
     )
 
     # ========================================================
-    # DETAIL ANALYSIS
+    # SCORE ANALYSIS
     # ========================================================
 
     st.subheader(
-        "🔎 Detailanalyse"
+        "🧮 Score-Berechnung"
     )
 
     selected_ticker = st.selectbox(
@@ -3989,13 +3746,10 @@ if st.button(
 
         detail_score, detail_scores = (
             calculate_scores(
-                detail_metrics
+                detail_metrics,
+                active_weights
             )
         )
-
-        # ----------------------------------------------------
-        # COMPANY NAME
-        # ----------------------------------------------------
 
         st.markdown(
             f"### {detail_metrics['name']} "
@@ -4007,12 +3761,100 @@ if st.button(
         )
 
         # ----------------------------------------------------
-        # SCORE CARDS
+        # CURRENT WEIGHTS
         # ----------------------------------------------------
 
-        col1, col2, col3, col4, col5 = st.columns(5)
+        st.markdown(
+            "#### Aktuelle Gewichtung"
+        )
 
-        with col1:
+        weight_display = pd.DataFrame({
+
+            'Kategorie': [
+                'Fair Value',
+                'Relative Valuation',
+                'Quality',
+                'Risk',
+                'Technical Trend'
+            ],
+
+            'Score': [
+                detail_scores.get(
+                    'fair_value',
+                    np.nan
+                ),
+                detail_scores.get(
+                    'valuation',
+                    np.nan
+                ),
+                detail_scores.get(
+                    'quality',
+                    np.nan
+                ),
+                detail_scores.get(
+                    'risk',
+                    np.nan
+                ),
+                detail_scores.get(
+                    'technical',
+                    np.nan
+                )
+            ],
+
+            'Gewichtung': [
+                active_weights['fair_value'],
+                active_weights['valuation'],
+                active_weights['quality'],
+                active_weights['risk'],
+                active_weights['technical']
+            ]
+        })
+
+        weight_display['Gewichtung'] = (
+            weight_display['Gewichtung']
+            * 100
+        )
+
+        weight_display['Beitrag zum Score'] = (
+            weight_display['Score']
+            * weight_display['Gewichtung']
+            / 100
+        )
+
+        weight_display['Score'] = (
+            weight_display['Score']
+            .round(1)
+        )
+
+        weight_display['Gewichtung'] = (
+            weight_display['Gewichtung']
+            .round(1)
+            .astype(str)
+            + "%"
+        )
+
+        weight_display['Beitrag zum Score'] = (
+            weight_display['Beitrag zum Score']
+            .round(2)
+        )
+
+        st.dataframe(
+            weight_display,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # ----------------------------------------------------
+        # TOTAL SCORE
+        # ----------------------------------------------------
+
+        st.markdown(
+            "#### Gesamtscore"
+        )
+
+        total_col1, total_col2, total_col3 = st.columns(3)
+
+        with total_col1:
 
             st.metric(
                 "Gesamtscore",
@@ -4023,357 +3865,73 @@ if st.button(
                 )
             )
 
-        with col2:
+        with total_col2:
 
             st.metric(
-                "Fair Value Score",
-                (
-                    f"{detail_scores['fair_value']:.0f}"
-                    if pd.notna(
-                        detail_scores['fair_value']
-                    )
-                    else "–"
-                )
+                "Gewichtung gesamt",
+                "100%"
             )
 
-        with col3:
+        with total_col3:
 
             st.metric(
-                "Relative Valuation",
-                (
-                    f"{detail_scores['valuation']:.0f}"
-                    if pd.notna(
-                        detail_scores['valuation']
-                    )
-                    else "–"
-                )
+                "Datenvollständigkeit",
+                f"{detail_metrics['data_completeness']}%"
             )
 
-        with col4:
+        # ----------------------------------------------------
+        # FORMULA EXPLANATION
+        # ----------------------------------------------------
 
-            st.metric(
-                "Quality",
-                (
-                    f"{detail_scores['quality']:.0f}"
-                    if pd.notna(
-                        detail_scores['quality']
-                    )
-                    else "–"
-                )
+        contribution_values = []
+
+        for key in [
+            'fair_value',
+            'valuation',
+            'quality',
+            'risk',
+            'technical'
+        ]:
+
+            score_value = detail_scores.get(
+                key,
+                np.nan
             )
 
-        with col5:
-
-            st.metric(
-                "Risk",
-                (
-                    f"{detail_scores['risk']:.0f}"
-                    if pd.notna(
-                        detail_scores['risk']
-                    )
-                    else "–"
-                )
+            weight_value = active_weights.get(
+                key,
+                0.0
             )
 
-        # Technical remains visible below the main cards
-        st.metric(
-            "Technical Trend",
-            (
-                f"{detail_scores['technical']:.0f}"
-                if pd.notna(
-                    detail_scores['technical']
+            if pd.notna(score_value):
+
+                contribution_values.append(
+                    score_value * weight_value
                 )
-                else "–"
+
+            else:
+
+                contribution_values.append(
+                    50.0 * weight_value
+                )
+
+        formula_text = (
+            " + ".join(
+                f"{value:.1f}"
+                for value in contribution_values
             )
         )
 
-        # ----------------------------------------------------
-        # DATA COMPLETENESS
-        # ----------------------------------------------------
-
-        st.metric(
-            "Datenvollständigkeit",
-            f"{detail_metrics['data_completeness']}%"
+        st.caption(
+            "Gesamtscore = gewichtete Summe der Einzel-Scores. "
+            "Fehlende Kategorien werden – wie bisher – mit 50 Punkten berücksichtigt."
         )
 
-        # ----------------------------------------------------
-        # RADAR + DETAILS
-        # ----------------------------------------------------
-
-        radar_col, detail_col = st.columns(
-            [1, 1]
+        st.code(
+            f"{formula_text} = "
+            f"{detail_score:.1f}",
+            language=None
         )
-
-        with radar_col:
-
-            st.plotly_chart(
-                create_radar(
-                    detail_scores
-                ),
-                use_container_width=True
-            )
-
-        with detail_col:
-
-            detail_df = pd.DataFrame({
-
-                'Kennzahl': [
-
-                    'Aktueller Kurs',
-                    'Marktkapitalisierung',
-
-                    'Fair Value Price',
-                    'Fair Value Potenzial',
-                    'Analysten-Kursziel',
-                    'Analysten-Potenzial',
-                    'FCF Fair Value',
-
-                    'Forward-KGV',
-                    'Trailing-KGV',
-                    'KUV',
-                    'KBV',
-                    'Forward-PEG',
-
-                    'Forward EPS',
-                    'Trailing EPS',
-                    'Gewinnwachstum',
-                    'Umsatzwachstum',
-
-                    'Bruttomarge',
-                    'Nettomarge',
-                    'ROE',
-                    'ROIC',
-
-                    'Operativer Cashflow',
-                    'FCF',
-                    'FCF-Marge',
-                    'FCF-Rendite',
-
-                    'Net Debt / EBITDA',
-                    'Debt / Equity',
-                    'Cash / Debt',
-                    'Current Ratio',
-
-                    'RSI (14)',
-                    'MACD',
-                    'MACD Signal',
-                    'MACD Histogramm',
-
-                    'SMA50',
-                    'SMA200',
-                    '1M Performance',
-                    '6M Performance',
-                    '12M Performance',
-                    'Über SMA200',
-
-                    'Datenvollständigkeit'
-                ],
-
-                'Wert': [
-
-                    detail_metrics['price'],
-                    detail_metrics['market_cap'],
-
-                    detail_metrics['fair_value_price'],
-                    detail_metrics['fair_value_upside'],
-                    detail_metrics['analyst_target_mean'],
-                    detail_metrics['analyst_target_upside'],
-                    detail_metrics['fcf_fair_value'],
-
-                    detail_metrics['forward_pe'],
-                    detail_metrics['trailing_pe'],
-                    detail_metrics['ps_ratio'],
-                    detail_metrics['pb_ratio'],
-                    detail_metrics['forward_peg'],
-
-                    detail_metrics['forward_eps'],
-                    detail_metrics['trailing_eps'],
-                    detail_metrics['earnings_growth'],
-                    detail_metrics['revenue_growth'],
-
-                    detail_metrics['gross_margin'],
-                    detail_metrics['net_margin'],
-                    detail_metrics['roe'],
-                    detail_metrics['roic'],
-
-                    detail_metrics['operating_cf'],
-                    detail_metrics['fcf'],
-                    detail_metrics['fcf_margin'],
-                    detail_metrics['fcf_yield'],
-
-                    detail_metrics['net_debt_ebitda'],
-                    detail_metrics['debt_to_equity'],
-                    detail_metrics['cash_to_debt'],
-                    detail_metrics['current_ratio'],
-
-                    detail_metrics['rsi14'],
-                    detail_metrics['macd'],
-                    detail_metrics['macd_signal'],
-                    detail_metrics['macd_hist'],
-
-                    detail_metrics['sma50'],
-                    detail_metrics['sma200'],
-                    detail_metrics['perf_1m'],
-                    detail_metrics['perf_6m'],
-                    detail_metrics['perf_12m'],
-
-                    (
-                        "Ja"
-                        if detail_metrics[
-                            'above_sma200'
-                        ] is True
-
-                        else (
-                            "Nein"
-                            if detail_metrics[
-                                'above_sma200'
-                            ] is False
-                            else "–"
-                        )
-                    ),
-
-                    f"{detail_metrics['data_completeness']}%"
-                ]
-            })
-
-            # ------------------------------------------------
-            # FORMAT DETAILS
-            # ------------------------------------------------
-
-            percentage_metrics = {
-                'Fair Value Potenzial',
-                'Analysten-Potenzial',
-                'Gewinnwachstum',
-                'Umsatzwachstum',
-                'Bruttomarge',
-                'Nettomarge',
-                'ROE',
-                'ROIC',
-                'FCF-Marge',
-                'FCF-Rendite',
-                '1M Performance',
-                '6M Performance',
-                '12M Performance'
-            }
-
-            formatted_values = []
-
-            for _, row in detail_df.iterrows():
-
-                metric = row['Kennzahl']
-                value = row['Wert']
-
-                if metric in percentage_metrics:
-
-                    if pd.notna(value):
-
-                        formatted_values.append(
-                            f"{value * 100:.1f}%"
-                        )
-
-                    else:
-
-                        formatted_values.append(
-                            "–"
-                        )
-
-                elif metric == 'Marktkapitalisierung':
-
-                    if pd.notna(value):
-
-                        formatted_values.append(
-                            f"{value / 1_000_000_000:.2f} Mrd."
-                        )
-
-                    else:
-
-                        formatted_values.append(
-                            "–"
-                        )
-
-                elif metric in [
-                    'Operativer Cashflow',
-                    'FCF'
-                ]:
-
-                    if pd.notna(value):
-
-                        formatted_values.append(
-                            f"{value / 1_000_000:.0f} Mio."
-                        )
-
-                    else:
-
-                        formatted_values.append(
-                            "–"
-                        )
-
-                elif metric in [
-                    'Forward-KGV',
-                    'Trailing-KGV',
-                    'KUV',
-                    'KBV',
-                    'Forward-PEG',
-                    'Net Debt / EBITDA',
-                    'Debt / Equity',
-                    'Cash / Debt',
-                    'Current Ratio',
-                    'RSI (14)',
-                    'MACD',
-                    'MACD Signal',
-                    'MACD Histogramm'
-                ]:
-
-                    if pd.notna(value):
-
-                        formatted_values.append(
-                            f"{value:.2f}"
-                        )
-
-                    else:
-
-                        formatted_values.append(
-                            "–"
-                        )
-
-                elif metric in [
-                    'Aktueller Kurs',
-                    'Fair Value Price',
-                    'Analysten-Kursziel',
-                    'FCF Fair Value',
-                    'Forward EPS',
-                    'Trailing EPS',
-                    'SMA50',
-                    'SMA200'
-                ]:
-
-                    if pd.notna(value):
-
-                        formatted_values.append(
-                            f"{value:.2f}"
-                        )
-
-                    else:
-
-                        formatted_values.append(
-                            "–"
-                        )
-
-                else:
-
-                    formatted_values.append(
-                        str(value)
-                    )
-
-            detail_df['Wert'] = (
-                formatted_values
-            )
-
-            st.dataframe(
-                detail_df,
-                use_container_width=True,
-                hide_index=True
-            )
 
         # ----------------------------------------------------
         # STATUS
