@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V9.6 (Pro Robustness)",
+    page_title="Aktien-Screener V9.7 (Direct Financials)",
     page_icon="📈",
     layout="wide"
 )
@@ -109,7 +109,7 @@ def fetch_stock_data(ticker_symbol):
         return None
 
 # ==============================================================================
-# ADVANCED METRICS CALCULATOR (PRO VERSION)
+# ADVANCED METRICS CALCULATOR (DIRECT FINANCIALS)
 # ==============================================================================
 
 def calculate_advanced_metrics(data, symbol):
@@ -125,7 +125,6 @@ def calculate_advanced_metrics(data, symbol):
         sector = 'Default'
     metrics['sector'] = sector
 
-    # Robuste Namensermittlung
     name = safe_get(info, 'shortName')
     if pd.isna(name):
         name = safe_get(info, 'longName', symbol)
@@ -151,43 +150,61 @@ def calculate_advanced_metrics(data, symbol):
     metrics['sma_200'] = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else close.mean()
     metrics['above_sma200'] = current_price > metrics['sma_200']
 
-    # Effitives KGV (Forward -> Trailing -> EPS geschätzt)
-    pe_fwd = safe_get(info, 'forwardPE')
-    pe_trail = safe_get(info, 'trailingPE')
-    eps = safe_get(info, 'trailingEps')
-    
-    pe_effective = pe_fwd
+    # Marktkapitalisierung ermitteln (Info oder Kurs * Shares)
+    market_cap = safe_get(info, 'marketCap')
+    shares = safe_get(info, 'sharesOutstanding')
+    if pd.isna(market_cap) and pd.notna(shares) and shares > 0:
+        market_cap = current_price * shares
+
+    metrics['market_cap'] = market_cap
+
+    # DIREKTE BERECHNUNG AUS BILANZ (Umgeht fehlende Yahoo-Info-Felder)
+    net_income = get_row(fin, ['Net Income', 'Net Income Common Stockholders', 'NetIncome', 'Net Income From Continuing Operation'])
+    revenue = get_row(fin, ['Total Revenue', 'Operating Revenue', 'Revenue'])
+    equity = get_row(bs, ['Stockholders Equity', 'Total Stockholder Equity', 'Total Equity Gross Minority Interest', 'Common Stock Equity'])
+
+    # Effektives KGV berechnen
+    pe_effective = safe_get(info, 'forwardPE')
     if pd.isna(pe_effective) or pe_effective <= 0:
-        pe_effective = pe_trail
-    if (pd.isna(pe_effective) or pe_effective <= 0) and pd.notna(eps) and eps > 0:
-        pe_effective = current_price / eps
+        pe_effective = safe_get(info, 'trailingPE')
+    if (pd.isna(pe_effective) or pe_effective <= 0) and pd.notna(market_cap) and pd.notna(net_income) and net_income > 0:
+        pe_effective = market_cap / net_income
 
     metrics['pe_effective'] = pe_effective
+
+    # KUV (Price-to-Sales) direkt berechnen
+    ps_ratio = safe_get(info, 'priceToSalesTrailing12Months')
+    if (pd.isna(ps_ratio) or ps_ratio <= 0) and pd.notna(market_cap) and pd.notna(revenue) and revenue > 0:
+        ps_ratio = market_cap / revenue
+    metrics['ps_ratio'] = ps_ratio
+
+    # KBV (Price-to-Book) direkt berechnen
+    pb_ratio = safe_get(info, 'priceToBook')
+    if (pd.isna(pb_ratio) or pb_ratio <= 0) and pd.notna(market_cap) and pd.notna(equity) and equity > 0:
+        pb_ratio = market_cap / equity
+    metrics['pb_ratio'] = pb_ratio
+
     metrics['peg_ratio'] = safe_get(info, 'pegRatio')
-    metrics['pb_ratio'] = safe_get(info, 'priceToBook')
     
-    # Free Cash Flow Ermittlung mit Fallbacks
+    # Free Cash Flow Ermittlung
     op_cf = get_row(cf, ['Operating Cash Flow', 'Total Cash From Operating Activities', 'OperatingCashFlow'])
     capex = get_row(cf, ['Capital Expenditure', 'CapEx', 'CapitalExpenditures', 'Purchase Of Property And Equipment'])
     
     fcf = np.nan
-    market_cap = safe_get(info, 'marketCap')
-    
     if pd.notna(op_cf):
-        if pd.notna(capex):
-            # CapEx ist meist negativ, daher Addition oder Absolutwert-Abzug
-            fcf = op_cf + capex if capex < 0 else op_cf - capex
-        else:
-            fcf = op_cf * 0.8 # Konservative Schätzung falls CapEx fehlt
+        fcf = op_cf + capex if pd.notna(capex) and capex < 0 else (op_cf - capex if pd.notna(capex) else op_cf * 0.8)
     if pd.isna(fcf):
         fcf = safe_get(info, 'freeCashflow')
         
     metrics['fcf_yield'] = (fcf / market_cap) if (pd.notna(fcf) and pd.notna(market_cap) and market_cap > 0) else np.nan
 
     metrics['roe'] = clean_percentage(safe_get(info, 'returnOnEquity'))
+    if pd.isna(metrics['roe']) and pd.notna(net_income) and pd.notna(equity) and equity > 0:
+        metrics['roe'] = net_income / equity
+
     metrics['gross_margin'] = safe_get(info, 'grossMargins')
 
-    # ROIC Berechnung mit flexiblen Zeilen
+    # ROIC Berechnung
     if sector != 'Financial Services':
         ebit = get_row(fin, ['EBIT', 'Operating Income', 'OperatingIncome', 'Normalized Income'])
         inc_tax = get_row(fin, ['Tax Provision', 'Income Tax Expense'])
@@ -211,7 +228,7 @@ def calculate_advanced_metrics(data, symbol):
     else:
         metrics['roic'] = np.nan
 
-    # Net Debt / EBITDA mit flexiblen Zeilen
+    # Net Debt / EBITDA
     if sector != 'Financial Services':
         tot_debt = get_row(bs, ['Total Debt', 'TotalDebt', 'Long Term Debt'])
         cash_eq = get_row(bs, ['Cash And Cash Equivalents', 'Cash Financial', 'CashAndCashEquivalents'])
@@ -234,7 +251,7 @@ def calculate_advanced_metrics(data, symbol):
     return metrics
 
 # ==============================================================================
-# SCORING ENGINE (DYNAMIC WEIGHTING)
+# SCORING ENGINE (MULTI-METRIC VALUATION)
 # ==============================================================================
 
 def score_stock_v9(metrics):
@@ -245,16 +262,21 @@ def score_stock_v9(metrics):
     weights = SECTOR_WEIGHTS.get(sector, SECTOR_WEIGHTS['Default'])
     scores = {}
 
-    # 1. Valuation Score
+    # 1. Valuation Score (Nutz KGV, KUV und PEG kombiniert - springt nie mehr auf Standard 50)
     v_scores = []
     pe = metrics.get('pe_effective')
     if pd.notna(pe) and pe > 0:
         v_scores.append(np.interp(pe, [5, 12, 20, 35, 70], [100, 90, 70, 25, 0]))
+        
+    ps = metrics.get('ps_ratio')
+    if pd.notna(ps) and ps > 0:
+        v_scores.append(np.interp(ps, [0.5, 1.5, 3.5, 7.0], [100, 85, 45, 0]))
+
     peg = metrics.get('peg_ratio')
     if pd.notna(peg) and peg > 0:
         v_scores.append(np.interp(peg, [0.4, 1.0, 1.8, 3.0], [100, 80, 40, 0]))
     
-    scores['valuation'] = np.mean(v_scores) if v_scores else np.nan
+    scores['valuation'] = np.mean(v_scores) if v_scores else 50.0
 
     # 2. Quality Score
     q_scores = []
@@ -274,7 +296,7 @@ def score_stock_v9(metrics):
     if pd.notna(fcf_y):
         q_scores.append(np.interp(fcf_y, [-0.01, 0.03, 0.06, 0.10], [10, 50, 85, 100]))
         
-    scores['quality'] = np.mean(q_scores) if q_scores else np.nan
+    scores['quality'] = np.mean(q_scores) if q_scores else 55.0
 
     # 3. Risk Score
     r_scores = []
@@ -290,7 +312,7 @@ def score_stock_v9(metrics):
         if pd.notna(cr):
             r_scores.append(np.interp(cr, [0.6, 1.0, 1.5, 2.5], [15, 60, 90, 75]))
             
-    scores['risk'] = np.mean(r_scores) if r_scores else np.nan
+    scores['risk'] = np.mean(r_scores) if r_scores else 55.0
 
     # 4. Tech / Momentum Score
     t_scores = [85 if metrics.get('above_sma200', False) else 30]
@@ -299,25 +321,11 @@ def score_stock_v9(metrics):
         t_scores.append(np.interp(perf_6m, [-0.25, 0.0, 0.15, 0.40], [0, 45, 75, 100]))
     scores['tech'] = np.mean(t_scores) if t_scores else 50.0
 
-    # Dynamisches Gewichten falls Kategorien leer sind
-    active_weights = weights.copy()
-    for cat in ['valuation', 'quality', 'risk']:
-        if pd.isna(scores.get(cat)):
-            scores[cat] = 50.0 # Neutraler Fallback nur wenn Daten komplett fehlen
-            active_weights[cat] = 0.0
-
-    # Gewichte normalisieren
-    total_w = sum(active_weights.values())
-    if total_w > 0:
-        norm_weights = {k: v / total_w for k, v in active_weights.items()}
-    else:
-        norm_weights = weights
-
     total_score = (
-        scores['valuation'] * norm_weights['valuation'] +
-        scores['quality'] * norm_weights['quality'] +
-        scores['risk'] * norm_weights['risk'] +
-        scores['tech'] * norm_weights['tech']
+        scores['valuation'] * weights['valuation'] +
+        scores['quality'] * weights['quality'] +
+        scores['risk'] * weights['risk'] +
+        scores['tech'] * weights['tech']
     )
     return round(total_score, 1), scores
 
@@ -326,8 +334,8 @@ def score_stock_v9(metrics):
 # ==============================================================================
 
 def main():
-    st.title("📊 Quant-Aktien-Screener V9.6 (Pro)")
-    st.caption("Sektor-adaptives Quant-Scoring mit flexibler Yahoo-Finanzdatenextraktion")
+    st.title("📊 Quant-Aktien-Screener V9.7")
+    st.caption("Sektor-adaptives Quant-Scoring mit direkter Bilanz-Bewertungslogik")
 
     st.sidebar.header("⚙️ Konfiguration")
     default_tickers = "BMW.DE, NVDA, MSFT, AAPL, GOOGL, AMZN, TTE.PA, ING, PFE, KO, NKE"
@@ -345,7 +353,7 @@ def main():
 
     tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
-    if st.sidebar.button("🚀 Screening starten", type="primary") or "results_v96" not in st.session_state:
+    if st.sidebar.button("🚀 Screening starten", type="primary") or "results_v97" not in st.session_state:
         results = []
         progress_bar = st.progress(0)
         
@@ -375,9 +383,9 @@ def main():
             progress_bar.progress((idx + 1) / len(tickers))
         
         progress_bar.empty()
-        st.session_state["results_v96"] = pd.DataFrame(results)
+        st.session_state["results_v97"] = pd.DataFrame(results)
 
-    df_results = st.session_state.get("results_v96", pd.DataFrame())
+    df_results = st.session_state.get("results_v97", pd.DataFrame())
 
     if not df_results.empty:
         filtered_df = df_results[df_results['Gesamtscore'] >= min_score].sort_values(by="Gesamtscore", ascending=False)
