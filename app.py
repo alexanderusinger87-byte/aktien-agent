@@ -125,6 +125,7 @@ DEBT_KEYS = [
 OPERATING_CF_KEYS = [
     'Operating Cash Flow',
     'Total Cash From Operating Activities',
+    'Cash Flow From Continuing Operating Activities',
     'OperatingCashFlow'
 ]
 
@@ -208,13 +209,11 @@ def clean_positive(value):
 
 def get_row(df, possible_keys):
 
-    if df is None:
-        return np.nan
-
-    if not isinstance(df, pd.DataFrame):
-        return np.nan
-
-    if df.empty:
+    if (
+        df is None
+        or not isinstance(df, pd.DataFrame)
+        or df.empty
+    ):
         return np.nan
 
     for key in possible_keys:
@@ -240,6 +239,49 @@ def get_row(df, possible_keys):
             return to_number(
                 row.iloc[0]
             )
+
+        except Exception:
+            continue
+
+    return np.nan
+
+
+def get_first_valid_row(df, possible_keys):
+
+    """
+    Liefert den aktuellsten verfügbaren Wert einer der
+    angegebenen Zeilen aus einem Yahoo-Financial-Statement.
+    """
+
+    if (
+        df is None
+        or not isinstance(df, pd.DataFrame)
+        or df.empty
+    ):
+        return np.nan
+
+    for key in possible_keys:
+
+        if key not in df.index:
+            continue
+
+        try:
+
+            row = df.loc[key]
+
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+
+            values = pd.to_numeric(
+                row,
+                errors="coerce"
+            ).dropna()
+
+            if not values.empty:
+
+                return to_number(
+                    values.iloc[0]
+                )
 
         except Exception:
             continue
@@ -717,6 +759,82 @@ def get_current_price(
     return np.nan
 
 
+def get_shares_outstanding(
+    info,
+    fast_info,
+    market_cap,
+    current_price
+):
+
+    # --------------------------------------------------------
+    # 1. Direkte Yahoo-Angabe
+    # --------------------------------------------------------
+
+    for key in [
+        'sharesOutstanding',
+        'impliedSharesOutstanding'
+    ]:
+
+        value = to_number(
+            safe_get(
+                info,
+                key
+            )
+        )
+
+        if (
+            pd.notna(value)
+            and value > 0
+        ):
+            return value
+
+    # --------------------------------------------------------
+    # 2. Fast Info
+    # --------------------------------------------------------
+
+    for key in [
+        'shares',
+        'sharesOutstanding'
+    ]:
+
+        value = to_number(
+            safe_get(
+                fast_info,
+                key
+            )
+        )
+
+        if (
+            pd.notna(value)
+            and value > 0
+        ):
+            return value
+
+    # --------------------------------------------------------
+    # 3. Fallback über Marktkapitalisierung / Kurs
+    # --------------------------------------------------------
+
+    if (
+        pd.notna(market_cap)
+        and market_cap > 0
+        and pd.notna(current_price)
+        and current_price > 0
+    ):
+
+        shares = (
+            market_cap
+            / current_price
+        )
+
+        if (
+            pd.notna(shares)
+            and shares > 0
+        ):
+            return shares
+
+    return np.nan
+
+
 # ============================================================
 # SECTOR
 # ============================================================
@@ -889,12 +1007,91 @@ def calculate_pb(
 
 
 # ============================================================
+# FREE CASH FLOW
+# ============================================================
+
+def get_free_cash_flow(
+    info,
+    cashflow
+):
+
+    # --------------------------------------------------------
+    # 1. Yahoo direktes FCF-Feld
+    # --------------------------------------------------------
+
+    direct_fcf = to_number(
+        safe_get(
+            info,
+            'freeCashflow'
+        )
+    )
+
+    if pd.notna(direct_fcf):
+        return direct_fcf
+
+    # --------------------------------------------------------
+    # 2. Direkte Free-Cash-Flow-Zeile
+    # --------------------------------------------------------
+
+    direct_statement_fcf = get_first_valid_row(
+        cashflow,
+        [
+            'Free Cash Flow',
+            'FreeCashFlow',
+            'Free Cashflow',
+            'FreeCashflow'
+        ]
+    )
+
+    if pd.notna(direct_statement_fcf):
+        return direct_statement_fcf
+
+    # --------------------------------------------------------
+    # 3. Operating CF - CapEx
+    # --------------------------------------------------------
+
+    operating_cf = get_first_valid_row(
+        cashflow,
+        [
+            'Operating Cash Flow',
+            'Total Cash From Operating Activities',
+            'Cash Flow From Continuing Operating Activities',
+            'OperatingCashFlow'
+        ]
+    )
+
+    capex = get_first_valid_row(
+        cashflow,
+        [
+            'Capital Expenditure',
+            'Capital Expenditures',
+            'CapitalExpenditures',
+            'CapEx',
+            'Purchase Of Property And Equipment'
+        ]
+    )
+
+    if (
+        pd.notna(operating_cf)
+        and pd.notna(capex)
+    ):
+
+        # Yahoo liefert CapEx normalerweise negativ.
+        if capex < 0:
+            return operating_cf + capex
+
+        return operating_cf - capex
+
+    return np.nan
+
+
+# ============================================================
 # FAIR VALUE MODEL
 # ============================================================
 
 def calculate_fcf_fair_value(
     fcf,
-    market_cap,
+    shares_outstanding,
     current_price,
     growth_rate
 ):
@@ -902,35 +1099,45 @@ def calculate_fcf_fair_value(
     if (
         pd.isna(fcf)
         or fcf <= 0
-        or pd.isna(market_cap)
-        or market_cap <= 0
+        or pd.isna(shares_outstanding)
+        or shares_outstanding <= 0
         or pd.isna(current_price)
         or current_price <= 0
     ):
         return np.nan
 
-    shares = (
-        market_cap
-        / current_price
+    # --------------------------------------------------------
+    # FCF PER SHARE
+    # --------------------------------------------------------
+
+    fcf_per_share = (
+        fcf
+        / shares_outstanding
     )
 
     if (
-        pd.isna(shares)
-        or shares <= 0
+        pd.isna(fcf_per_share)
+        or fcf_per_share <= 0
     ):
         return np.nan
 
-    # Conservative normalized long-term assumptions.
-    # Growth is deliberately capped to prevent extreme
-    # analyst growth assumptions from dominating the model.
+    # --------------------------------------------------------
+    # GROWTH
+    # --------------------------------------------------------
+
     if pd.isna(growth_rate):
         growth_rate = 0.05
 
+    # Conservative cap.
     growth_rate = np.clip(
         growth_rate,
         -0.05,
-        0.12
+        0.15
     )
+
+    # --------------------------------------------------------
+    # DCF ASSUMPTIONS
+    # --------------------------------------------------------
 
     discount_rate = 0.09
     terminal_growth = 0.025
@@ -938,11 +1145,16 @@ def calculate_fcf_fair_value(
     if terminal_growth >= discount_rate:
         return np.nan
 
+    # --------------------------------------------------------
+    # 5-YEAR FCF PROJECTION
+    # --------------------------------------------------------
+
     pv_fcf = 0.0
-    projected_fcf = fcf
+    projected_fcf = fcf_per_share
 
     for year in range(1, 6):
 
+        # Gradual normalization towards terminal growth.
         year_growth = (
             growth_rate
             + (
@@ -953,9 +1165,8 @@ def calculate_fcf_fair_value(
             / 4
         )
 
-        projected_fcf = (
-            projected_fcf
-            * (1 + year_growth)
+        projected_fcf *= (
+            1 + year_growth
         )
 
         pv_fcf += (
@@ -965,6 +1176,10 @@ def calculate_fcf_fair_value(
                 ** year
             )
         )
+
+    # --------------------------------------------------------
+    # TERMINAL VALUE
+    # --------------------------------------------------------
 
     terminal_value = (
         projected_fcf
@@ -983,21 +1198,24 @@ def calculate_fcf_fair_value(
         )
     )
 
-    enterprise_value = (
+    fair_value = (
         pv_fcf
         + pv_terminal
     )
 
-    fair_value = (
-        enterprise_value
-        / shares
-    )
+    # --------------------------------------------------------
+    # SANITY CHECK
+    # --------------------------------------------------------
+    #
+    # Keine unrealistische harte 4x-Grenze mehr.
+    # Extremwerte werden trotzdem verworfen.
+    # --------------------------------------------------------
 
     if (
         pd.isna(fair_value)
         or fair_value <= 0
-        or fair_value > current_price * 4
-        or fair_value < current_price * 0.10
+        or fair_value > current_price * 10
+        or fair_value < current_price * 0.05
     ):
         return np.nan
 
@@ -1227,6 +1445,13 @@ def extract_metrics(data):
         info,
         fast_info,
         hist
+    )
+
+    shares_outstanding = get_shares_outstanding(
+        info,
+        fast_info,
+        market_cap,
+        current_price
     )
 
     sector = get_sector(
@@ -1610,48 +1835,35 @@ def extract_metrics(data):
     # CASH FLOW
     # --------------------------------------------------------
 
-    operating_cf = get_row(
+    operating_cf = get_first_valid_row(
         cashflow,
-        OPERATING_CF_KEYS
+        [
+            'Operating Cash Flow',
+            'Total Cash From Operating Activities',
+            'Cash Flow From Continuing Operating Activities',
+            'OperatingCashFlow'
+        ]
     )
 
-    capex = get_row(
+    capex = get_first_valid_row(
         cashflow,
-        CAPEX_KEYS
+        [
+            'Capital Expenditure',
+            'Capital Expenditures',
+            'CapitalExpenditures',
+            'CapEx',
+            'Purchase Of Property And Equipment'
+        ]
     )
 
-    fcf = np.nan
+    # --------------------------------------------------------
+    # FREE CASH FLOW
+    # --------------------------------------------------------
 
-    if (
-        pd.notna(operating_cf)
-        and pd.notna(capex)
-    ):
-
-        if capex < 0:
-
-            fcf = (
-                operating_cf
-                + capex
-            )
-
-        else:
-
-            fcf = (
-                operating_cf
-                - capex
-            )
-
-    if pd.isna(fcf):
-
-        yahoo_fcf = to_number(
-            safe_get(
-                info,
-                'freeCashflow'
-            )
-        )
-
-        if pd.notna(yahoo_fcf):
-            fcf = yahoo_fcf
+    fcf = get_free_cash_flow(
+        info,
+        cashflow
+    )
 
     fcf_yield = np.nan
     fcf_margin = np.nan
@@ -1849,7 +2061,7 @@ def extract_metrics(data):
 
         fcf_fair_value = calculate_fcf_fair_value(
             fcf,
-            market_cap,
+            shares_outstanding,
             current_price,
             dcf_growth
         )
@@ -2016,11 +2228,6 @@ def extract_metrics(data):
     # ========================================================
     # DATA COMPLETENESS
     # ========================================================
-    #
-    # Completeness now reflects the actual five score blocks.
-    # A stock is NOT considered complete merely because random
-    # Yahoo fields happen to exist.
-    # ========================================================
 
     completeness_blocks = []
 
@@ -2107,6 +2314,7 @@ def extract_metrics(data):
 
         'price': current_price,
         'market_cap': market_cap,
+        'shares_outstanding': shares_outstanding,
 
         'revenue': revenue,
         'net_income': net_income,
@@ -2682,9 +2890,6 @@ def calculate_scores(metrics):
 
     if pd.notna(rsi):
 
-        # Momentum-oriented RSI scoring.
-        # Very high RSI is not treated as automatically bad,
-        # but extreme overbought conditions are moderated.
         rsi_score = np.interp(
             rsi,
             [20, 30, 40, 50, 60, 70, 80, 90],
@@ -2794,17 +2999,6 @@ def calculate_scores(metrics):
 
     # ========================================================
     # FINAL SCORE
-    # ========================================================
-    #
-    # IMPORTANT:
-    # Missing categories are NOT redistributed to the others.
-    #
-    # Instead:
-    # 1. Calculate the weighted score from available categories.
-    # 2. Missing weight contributes a neutral 50.
-    #
-    # This prevents a stock from receiving an artificially high
-    # score simply because one category is unavailable.
     # ========================================================
 
     available_weight = 0.0
