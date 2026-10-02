@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V9.9 (Data Quality)",
+    page_title="Aktien-Screener V10.0 (Cache Fix)",
     page_icon="📈",
     layout="wide"
 )
@@ -80,7 +80,7 @@ def get_turnaround_status(metrics):
     elif is_beaten_down and (-0.02 <= perf_1m < 0.02):
         return "⏱ Bodenbildung"
     else:
-        return "🛡️ Trend / Normal"
+        return "🛡️️ Trend / Normal"
 
 def get_combined_recommendation(score, turnaround_status):
     if pd.isna(score):
@@ -101,17 +101,18 @@ def get_combined_recommendation(score, turnaround_status):
         else:
             return "🔴 Verkaufen"
 
-@st.cache_data(ttl=3600*12)
+# SICHERER DOWNLOAD OHNE STREAMLIT-CACHE-FEHLER AUF OBJEKTEN
 def fetch_stock_data(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
+        
         try:
-            info = ticker.info
+            info = dict(ticker.info)
         except Exception:
             info = {}
             
         try:
-            fast_info = ticker.fast_info
+            fast_info = dict(ticker.fast_info)
         except Exception:
             fast_info = {}
 
@@ -145,10 +146,8 @@ def calculate_advanced_metrics(data, symbol):
     metrics = {}
     
     sector = safe_get(info, 'sector')
-    sector_source = "Yahoo Info"
     if pd.isna(sector) or sector == 'Default':
         sector = FALLBACK_SECTORS.get(symbol, 'Default')
-        sector_source = "Fallback"
     metrics['sector'] = sector
 
     name = safe_get(info, 'shortName')
@@ -176,7 +175,6 @@ def calculate_advanced_metrics(data, symbol):
     metrics['sma_200'] = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else close.mean()
     metrics['above_sma200'] = current_price > metrics['sma_200']
 
-    # Marktkapitalisierung
     market_cap = np.nan
     try:
         market_cap = fast_info.get('market_cap', np.nan)
@@ -189,7 +187,6 @@ def calculate_advanced_metrics(data, symbol):
         market_cap = current_price * shares
     metrics['market_cap'] = market_cap
 
-    # Bilanzen auslesen
     net_income = get_row(fin, ['Net Income', 'Net Income Common Stockholders', 'NetIncome', 'Net Income From Continuing Operation'])
     revenue = get_row(fin, ['Total Revenue', 'Operating Revenue', 'Revenue'])
     equity = get_row(bs, ['Stockholders Equity', 'Total Stockholder Equity', 'Total Equity Gross Minority Interest', 'Common Stock Equity'])
@@ -267,7 +264,6 @@ def calculate_advanced_metrics(data, symbol):
     metrics['current_ratio'] = safe_get(info, 'currentRatio')
     metrics['turnaround_status'] = get_turnaround_status(metrics)
 
-    # DATENQUALITÄTS-CHECK (Zählt wie viele Kernfelder erfolgreich da sind)
     core_fields = [
         metrics['pe_effective'], metrics['ps_ratio'], metrics['fcf_yield'], 
         metrics['gross_margin'], metrics['market_cap'], metrics['current_ratio']
@@ -283,7 +279,7 @@ def calculate_advanced_metrics(data, symbol):
     return metrics
 
 # ==============================================================================
-# STRICT SCORING ENGINE (NO FAKE DEFAULTS)
+# STRICT SCORING ENGINE
 # ==============================================================================
 
 def score_stock_v9(metrics):
@@ -294,7 +290,6 @@ def score_stock_v9(metrics):
     weights = SECTOR_WEIGHTS.get(sector, SECTOR_WEIGHTS['Default'])
     scores = {}
 
-    # 1. Valuation Score
     v_scores = []
     pe = metrics.get('pe_effective')
     if pd.notna(pe) and pe > 0:
@@ -305,10 +300,8 @@ def score_stock_v9(metrics):
     peg = metrics.get('peg_ratio')
     if pd.notna(peg) and peg > 0:
         v_scores.append(np.interp(peg, [0.4, 1.0, 1.8, 3.0], [100, 80, 40, 0]))
-    
     scores['valuation'] = np.mean(v_scores) if v_scores else np.nan
 
-    # 2. Quality Score
     q_scores = []
     if sector == 'Financial Services':
         roe = metrics.get('roe')
@@ -321,14 +314,11 @@ def score_stock_v9(metrics):
         gm = metrics.get('gross_margin')
         if pd.notna(gm):
             q_scores.append(np.interp(gm, [0.15, 0.35, 0.55, 0.75], [20, 50, 80, 100]))
-            
     fcf_y = metrics.get('fcf_yield')
     if pd.notna(fcf_y):
         q_scores.append(np.interp(fcf_y, [-0.01, 0.03, 0.06, 0.10], [10, 50, 85, 100]))
-        
     scores['quality'] = np.mean(q_scores) if q_scores else np.nan
 
-    # 3. Risk Score
     r_scores = []
     if sector == 'Financial Services':
         pb = metrics.get('pb_ratio')
@@ -341,17 +331,14 @@ def score_stock_v9(metrics):
         cr = metrics.get('current_ratio')
         if pd.notna(cr):
             r_scores.append(np.interp(cr, [0.6, 1.0, 1.5, 2.5], [15, 60, 90, 75]))
-            
     scores['risk'] = np.mean(r_scores) if r_scores else np.nan
 
-    # 4. Tech / Momentum Score
     t_scores = [85 if metrics.get('above_sma200', False) else 30]
     perf_6m = metrics.get('perf_6m')
     if pd.notna(perf_6m):
         t_scores.append(np.interp(perf_6m, [-0.25, 0.0, 0.15, 0.40], [0, 45, 75, 100]))
     scores['tech'] = np.mean(t_scores) if t_scores else np.nan
 
-    # Dynamisches Gewichten ohne Fake-Notanker
     active_weights = weights.copy()
     valid_scores = {}
     for cat in ['valuation', 'quality', 'risk', 'tech']:
@@ -362,10 +349,9 @@ def score_stock_v9(metrics):
 
     total_w = sum(active_weights.values())
     if total_w <= 0:
-        return np.nan, scores # Keine valide Berechnung möglich
+        return np.nan, scores
 
     norm_weights = {k: v / total_w for k, v in active_weights.items()}
-
     total_score = sum(valid_scores[cat] * norm_weights[cat] for cat in valid_scores)
     return round(total_score, 1), scores
 
@@ -374,8 +360,8 @@ def score_stock_v9(metrics):
 # ==============================================================================
 
 def main():
-    st.title("📊 Quant-Aktien-Screener V9.9 (Strict & Quality)")
-    st.caption("Echtes Quant-Scoring mit transparenter Datenqualitäts-Prüfung und ohne Fake-Scores")
+    st.title("📊 Quant-Aktien-Screener V10.0")
+    st.caption("Stabiler Live-Screener ohne Serialisierungsfehler")
 
     st.sidebar.header("⚙️ Konfiguration")
     default_tickers = "BMW.DE, NVDA, MSFT, AAPL, GOOGL, AMZN, TTE.PA, ING, PFE, KO, NKE"
@@ -387,13 +373,13 @@ def main():
     
     min_score = st.sidebar.slider("Mindest-Gesamtscore", 0, 100, 0)
 
-    if st.sidebar.button("🔄 Live-Daten neu laden"):
+    if st.sidebar.button("🔄 Cache leeren & neu laden"):
         st.cache_data.clear()
         st.rerun()
 
     tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
-    if st.sidebar.button("🚀 Screening starten", type="primary") or "results_v99" not in st.session_state:
+    if st.sidebar.button("🚀 Screening starten", type="primary") or "results_v10" not in st.session_state:
         results = []
         progress_bar = st.progress(0)
         
@@ -424,21 +410,19 @@ def main():
             progress_bar.progress((idx + 1) / len(tickers))
         
         progress_bar.empty()
-        st.session_state["results_v99"] = pd.DataFrame(results)
+        st.session_state["results_v10"] = pd.DataFrame(results)
 
-    df_results = st.session_state.get("results_v99", pd.DataFrame())
+    df_results = st.session_state.get("results_v10", pd.DataFrame())
 
     if not df_results.empty:
-        # Filtern, aber NaN-Scores explizit behalten oder separat handhaben
         filtered_df = df_results[(df_results['Gesamtscore'] >= min_score) | (df_results['Gesamtscore'].isna())].sort_values(by="Gesamtscore", ascending=False, na_position='last')
 
         st.subheader("🏆 Screener Ergebnisse & Datenqualität")
         
         display_columns = ['Ticker', 'Name', 'Sektor', 'Gesamtscore', 'Datenqualität', 'Empfehlung', 'Turnaround Status', 'Valuation', 'Quality', 'Risk', 'Tech', 'KGV (Eff)']
         
-        # Färbung für unvollständige Daten via Pandas Styler
         def highlight_missing(row):
-            if pd.isna(row['Gesamtscore']) or int(row['Datenqualität'].replace('%','')) < 70:
+            if pd.isna(row['Gesamtscore']) or int(str(row['Datenqualität']).replace('%','')) < 70:
                 return ['background-color: rgba(255, 75, 75, 0.15)'] * len(row)
             return [''] * len(row)
 
