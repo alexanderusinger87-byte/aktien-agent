@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V10.5",
+    page_title="Aktien-Screener V10.6",
     page_icon="📊",
     layout="wide"
 )
@@ -287,6 +287,99 @@ def get_first_valid_row(df, possible_keys):
             continue
 
     return np.nan
+
+
+def get_numeric_series(df, possible_keys):
+
+    """
+    Liefert die komplette numerische Zeitreihe der ersten
+    gefundenen Finanzzeile. Die Reihenfolge wird chronologisch
+    sortiert, damit daraus Jahreswachstum berechnet werden kann.
+    """
+
+    if (
+        df is None
+        or not isinstance(df, pd.DataFrame)
+        or df.empty
+    ):
+        return pd.Series(dtype=float)
+
+    for key in possible_keys:
+
+        if key not in df.index:
+            continue
+
+        try:
+
+            row = df.loc[key]
+
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+
+            values = pd.to_numeric(
+                row,
+                errors="coerce"
+            ).dropna()
+
+            if values.empty:
+                continue
+
+            try:
+                values.index = pd.to_datetime(
+                    values.index
+                )
+                values = values.sort_index()
+            except Exception:
+                pass
+
+            return values.astype(float)
+
+        except Exception:
+            continue
+
+    return pd.Series(dtype=float)
+
+
+def calculate_growth_volatility(series):
+
+    if (
+        series is None
+        or not isinstance(series, pd.Series)
+        or len(series) < 3
+    ):
+        return np.nan
+
+    values = pd.to_numeric(
+        series,
+        errors="coerce"
+    ).dropna()
+
+    if len(values) < 3:
+        return np.nan
+
+    growth_rates = []
+
+    for previous, current in zip(
+        values.iloc[:-1],
+        values.iloc[1:]
+    ):
+
+        if (
+            pd.notna(previous)
+            and pd.notna(current)
+            and previous > 0
+            and current > 0
+        ):
+            growth_rates.append(
+                current / previous - 1
+            )
+
+    if len(growth_rates) < 2:
+        return np.nan
+
+    return float(
+        pd.Series(growth_rates).std(ddof=1)
+    )
 
 
 def get_estimate_value(df, row_name, column='avg'):
@@ -1168,8 +1261,7 @@ def calculate_fcf_fair_value(
             + (
                 terminal_growth
                 - growth_rate
-            )
-            * (year - 1)
+            ) * (year - 1)
             / 4
         )
 
@@ -1985,6 +2077,72 @@ def extract_metrics(data):
             )
 
     # --------------------------------------------------------
+    # RISK MARKET / BUSINESS STABILITY
+    # --------------------------------------------------------
+
+    annualized_volatility = np.nan
+    max_drawdown = np.nan
+
+    try:
+
+        close_for_risk = pd.to_numeric(
+            hist['Close'],
+            errors='coerce'
+        ).dropna()
+
+        if len(close_for_risk) >= 30:
+
+            daily_returns = (
+                close_for_risk
+                .pct_change()
+                .dropna()
+            )
+
+            if len(daily_returns) >= 20:
+
+                annualized_volatility = (
+                    daily_returns.std(ddof=1)
+                    * np.sqrt(252)
+                )
+
+            running_max = (
+                close_for_risk
+                .cummax()
+            )
+
+            drawdown_series = (
+                close_for_risk
+                / running_max
+                - 1.0
+            )
+
+            if not drawdown_series.empty:
+                max_drawdown = float(
+                    drawdown_series.min()
+                )
+
+    except Exception:
+        pass
+
+    historical_revenue = get_numeric_series(
+        financials,
+        REVENUE_KEYS
+    )
+
+    historical_net_income = get_numeric_series(
+        financials,
+        NET_INCOME_KEYS
+    )
+
+    revenue_growth_volatility = calculate_growth_volatility(
+        historical_revenue
+    )
+
+    earnings_growth_volatility = calculate_growth_volatility(
+        historical_net_income
+    )
+
+    # --------------------------------------------------------
     # ANALYST TARGET
     # --------------------------------------------------------
 
@@ -2268,21 +2426,16 @@ def extract_metrics(data):
         quality_available
     )
 
-    if sector == 'Financial Services':
-
-        risk_available = (
-            pd.notna(debt_to_equity)
-            or pd.notna(cash_to_debt)
-            or pd.notna(current_ratio)
-        )
-
-    else:
-
-        risk_available = (
-            pd.notna(net_debt_ebitda)
-            or pd.notna(current_ratio)
-            or pd.notna(debt_to_equity)
-        )
+    risk_available = (
+        pd.notna(annualized_volatility)
+        or pd.notna(max_drawdown)
+        or pd.notna(revenue_growth_volatility)
+        or pd.notna(earnings_growth_volatility)
+        or pd.notna(net_debt_ebitda)
+        or pd.notna(current_ratio)
+        or pd.notna(debt_to_equity)
+        or pd.notna(cash_to_debt)
+    )
 
     completeness_blocks.append(
         risk_available
@@ -2360,6 +2513,11 @@ def extract_metrics(data):
         'debt_to_equity': debt_to_equity,
         'cash_to_debt': cash_to_debt,
         'current_ratio': current_ratio,
+
+        'annualized_volatility': annualized_volatility,
+        'max_drawdown': max_drawdown,
+        'revenue_growth_volatility': revenue_growth_volatility,
+        'earnings_growth_volatility': earnings_growth_volatility,
 
         'analyst_target_mean': analyst_target_mean,
         'analyst_target_median': analyst_target_median,
@@ -2717,8 +2875,19 @@ def calculate_scores(metrics):
     # ========================================================
     # RISK
     # ========================================================
+    #
+    # Risk = financial strength + market risk + drawdown +
+    # business stability. 100 = lower risk, 0 = higher risk.
+    # Valuation is deliberately excluded because it is already
+    # represented by Fair Value / Valuation.
 
     risk_components = []
+
+    # --------------------------------------------------------
+    # 1. FINANCIAL STRENGTH (35%)
+    # --------------------------------------------------------
+
+    financial_components = []
 
     if sector == 'Financial Services':
 
@@ -2731,7 +2900,7 @@ def calculate_scores(metrics):
             and debt_to_equity >= 0
         ):
 
-            risk_components.append(
+            financial_components.append(
                 (
                     np.interp(
                         debt_to_equity,
@@ -2751,7 +2920,7 @@ def calculate_scores(metrics):
             and cash_to_debt >= 0
         ):
 
-            risk_components.append(
+            financial_components.append(
                 (
                     np.interp(
                         cash_to_debt,
@@ -2770,12 +2939,12 @@ def calculate_scores(metrics):
 
         if pd.notna(net_debt_ebitda):
 
-            risk_components.append(
+            financial_components.append(
                 (
                     np.interp(
                         net_debt_ebitda,
-                        [-1.0, 0.0, 1.0, 2.5, 4.0, 6.0],
-                        [100, 100, 85, 60, 25, 0]
+                        [-1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                        [100, 100, 85, 70, 50, 30, 10, 0]
                     ),
                     0.45
                 )
@@ -2787,14 +2956,14 @@ def calculate_scores(metrics):
 
         if pd.notna(current_ratio):
 
-            risk_components.append(
+            financial_components.append(
                 (
                     np.interp(
                         current_ratio,
-                        [0.5, 0.8, 1.0, 1.5, 2.5],
-                        [10, 35, 60, 90, 100]
+                        [0.5, 0.8, 1.0, 1.5, 2.0, 2.5],
+                        [10, 35, 55, 80, 95, 100]
                     ),
-                    0.25
+                    0.20
                 )
             )
 
@@ -2807,14 +2976,160 @@ def calculate_scores(metrics):
             and debt_to_equity >= 0
         ):
 
-            risk_components.append(
+            financial_components.append(
                 (
                     np.interp(
                         debt_to_equity,
-                        [10, 30, 60, 100, 200, 400],
-                        [100, 90, 75, 55, 25, 0]
+                        [10, 30, 60, 100, 150, 250, 400],
+                        [100, 90, 75, 55, 40, 15, 0]
                     ),
-                    0.30
+                    0.35
+                )
+            )
+
+    if financial_components:
+
+        financial_weighted_sum = sum(
+            score * weight
+            for score, weight
+            in financial_components
+        )
+
+        financial_weight_sum = sum(
+            weight
+            for _, weight
+            in financial_components
+        )
+
+        if financial_weight_sum > 0:
+
+            financial_score = (
+                financial_weighted_sum
+                / financial_weight_sum
+            )
+
+            risk_components.append(
+                (
+                    financial_score,
+                    0.35
+                )
+            )
+
+    # --------------------------------------------------------
+    # 2. HISTORICAL VOLATILITY (25%)
+    # --------------------------------------------------------
+
+    annualized_volatility = metrics.get(
+        'annualized_volatility'
+    )
+
+    if pd.notna(annualized_volatility):
+
+        volatility_score = np.interp(
+            annualized_volatility,
+            [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50],
+            [100, 90, 80, 65, 50, 25, 0]
+        )
+
+        risk_components.append(
+            (
+                volatility_score,
+                0.25
+            )
+        )
+
+    # --------------------------------------------------------
+    # 3. MAXIMUM DRAWDOWN (20%)
+    # --------------------------------------------------------
+
+    max_drawdown = metrics.get(
+        'max_drawdown'
+    )
+
+    if pd.notna(max_drawdown):
+
+        drawdown_score = np.interp(
+            abs(max_drawdown),
+            [0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.70],
+            [100, 90, 80, 60, 40, 20, 0]
+        )
+
+        risk_components.append(
+            (
+                drawdown_score,
+                0.20
+            )
+        )
+
+    # --------------------------------------------------------
+    # 4. BUSINESS STABILITY (20%)
+    # --------------------------------------------------------
+
+    stability_components = []
+
+    revenue_growth_volatility = metrics.get(
+        'revenue_growth_volatility'
+    )
+
+    if pd.notna(revenue_growth_volatility):
+
+        revenue_stability_score = np.interp(
+            revenue_growth_volatility,
+            [0.05, 0.10, 0.15, 0.20, 0.30, 0.40],
+            [100, 85, 70, 50, 25, 0]
+        )
+
+        stability_components.append(
+            (
+                revenue_stability_score,
+                0.40
+            )
+        )
+
+    earnings_growth_volatility = metrics.get(
+        'earnings_growth_volatility'
+    )
+
+    if pd.notna(earnings_growth_volatility):
+
+        earnings_stability_score = np.interp(
+            earnings_growth_volatility,
+            [0.05, 0.10, 0.20, 0.30, 0.50, 0.70],
+            [100, 85, 65, 45, 20, 0]
+        )
+
+        stability_components.append(
+            (
+                earnings_stability_score,
+                0.60
+            )
+        )
+
+    if stability_components:
+
+        stability_weighted_sum = sum(
+            score * weight
+            for score, weight
+            in stability_components
+        )
+
+        stability_weight_sum = sum(
+            weight
+            for _, weight
+            in stability_components
+        )
+
+        if stability_weight_sum > 0:
+
+            stability_score = (
+                stability_weighted_sum
+                / stability_weight_sum
+            )
+
+            risk_components.append(
+                (
+                    stability_score,
+                    0.20
                 )
             )
 
@@ -3269,7 +3584,7 @@ def style_results_table(df):
 # ============================================================
 
 st.title(
-    "📊 Quant-Aktien-Screener V10.5"
+    "📊 Quant-Aktien-Screener V10.6"
 )
 
 st.caption(
