@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V10.6",
+    page_title="Aktien-Screener V10.7",
     page_icon="📊",
     layout="wide"
 )
@@ -21,10 +21,10 @@ st.set_page_config(
 # ============================================================
 
 SCORE_WEIGHTS = {
-    'fair_value': 0.30,
-    'valuation': 0.25,
-    'quality': 0.25,
-    'risk': 0.10,
+    'fair_value': 0.25,
+    'valuation': 0.20,
+    'quality': 0.30,
+    'risk': 0.15,
     'technical': 0.10
 }
 
@@ -1261,7 +1261,8 @@ def calculate_fcf_fair_value(
             + (
                 terminal_growth
                 - growth_rate
-            ) * (year - 1)
+            )
+            * (year - 1)
             / 4
         )
 
@@ -1350,8 +1351,8 @@ def calculate_fair_value_score(
     if len(fair_values) == 2:
 
         fair_value_price = (
-            0.70 * fair_values[0][1]
-            + 0.30 * fair_values[1][1]
+            0.60 * fair_values[0][1]
+            + 0.40 * fair_values[1][1]
         )
 
     else:
@@ -3584,7 +3585,7 @@ def style_results_table(df):
 # ============================================================
 
 st.title(
-    "📊 Quant-Aktien-Screener V10.6"
+    "📊 Quant-Aktien-Screener V10.7"
 )
 
 st.caption(
