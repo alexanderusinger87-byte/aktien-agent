@@ -9,7 +9,7 @@ import numpy as np
 # ============================================================
 
 st.set_page_config(
-    page_title="Aktien-Screener V11.0",
+    page_title="Aktien-Screener V11.1",
     page_icon="📊",
     layout="wide"
 )
@@ -1103,23 +1103,12 @@ def get_free_cash_flow(cashflow):
 
     operating_cf = get_first_valid_row(
         cashflow,
-        [
-            'Operating Cash Flow',
-            'Total Cash From Operating Activities',
-            'Cash Flow From Continuing Operating Activities',
-            'OperatingCashFlow'
-        ]
+        OPERATING_CF_KEYS
     )
 
     capex = get_first_valid_row(
         cashflow,
-        [
-            'Capital Expenditure',
-            'Capital Expenditures',
-            'CapitalExpenditures',
-            'CapEx',
-            'Purchase Of Property And Equipment'
-        ]
+        CAPEX_KEYS
     )
 
     if (
@@ -1250,14 +1239,7 @@ def calculate_fcf_fair_value(
     ):
         return np.nan
 
-    dcf_lower_bound = current_price * 0.60
-    dcf_upper_bound = current_price * 1.75
-
-    if (
-        fair_value < dcf_lower_bound
-        or fair_value > dcf_upper_bound
-    ):
-        return np.nan
+    # Bewusst KEINE künstliche 0.60x–1.75x Begrenzung mehr.
 
     return fair_value
 
@@ -1304,8 +1286,8 @@ def calculate_fair_value_score(
         )
 
         fair_value_price = (
-            0.75 * analyst_value
-            + 0.25 * fcf_value
+            0.60 * fcf_value
+            + 0.40 * analyst_value
         )
 
     else:
@@ -1327,21 +1309,27 @@ def calculate_fair_value_score(
     fair_value_score = np.interp(
         upside,
         [
-            -0.40,
+            -0.30,
             -0.20,
+            -0.10,
             0.00,
             0.10,
-            0.25,
+            0.20,
+            0.30,
             0.50,
-            0.75
+            0.75,
+            1.00
         ],
         [
-            0,
-            15,
-            40,
-            58,
-            75,
-            90,
+            5,
+            20,
+            35,
+            50,
+            62,
+            72,
+            82,
+            92,
+            98,
             100
         ]
     )
@@ -1841,23 +1829,12 @@ def extract_metrics(data):
 
     operating_cf = get_first_valid_row(
         cashflow,
-        [
-            'Operating Cash Flow',
-            'Total Cash From Operating Activities',
-            'Cash Flow From Continuing Operating Activities',
-            'OperatingCashFlow'
-        ]
+        OPERATING_CF_KEYS
     )
 
     capex = get_first_valid_row(
         cashflow,
-        [
-            'Capital Expenditure',
-            'Capital Expenditures',
-            'CapitalExpenditures',
-            'CapEx',
-            'Purchase Of Property And Equipment'
-        ]
+        CAPEX_KEYS
     )
 
     fcf = get_free_cash_flow(
@@ -2078,6 +2055,10 @@ def extract_metrics(data):
             )
         )
 
+    # --------------------------------------------------------
+    # DCF GROWTH
+    # --------------------------------------------------------
+
     growth_inputs = []
 
     if pd.notna(revenue_growth):
@@ -2159,6 +2140,10 @@ def extract_metrics(data):
             / current_price
             - 1
         )
+
+    # --------------------------------------------------------
+    # TECHNICAL
+    # --------------------------------------------------------
 
     above_sma200 = np.nan
     above_sma50 = np.nan
@@ -3160,15 +3145,6 @@ def calculate_scores(
     # ========================================================
     # FINAL SCORE
     # ========================================================
-    #
-    # IMPORTANT:
-    # The individual category scores above are unchanged.
-    # Only the external category weights are configurable.
-    #
-    # The entered weights are normalized to 100%.
-    # Missing category scores retain the existing 50-point
-    # fallback exactly as before.
-    # ========================================================
 
     available_weight = 0.0
     weighted_score = 0.0
@@ -3212,6 +3188,587 @@ def calculate_scores(
         total_score,
         1
     ), scores
+
+
+# ============================================================
+# FUNDAMENTAL VERIFY SCORE
+# ============================================================
+#
+# WICHTIG:
+# Dieser Score ist absichtlich NICHT Teil des KPAX.
+#
+# Ziel:
+# Eine einfache, unabhängige Kontrollrechnung.
+#
+# 5 Kategorien à 20 Punkte:
+#
+# Wachstum        20
+# Profitabilität  20
+# Cashflow        20
+# Bilanz          20
+# Bewertung       20
+#
+# Fehlende Kategorien werden NICHT mit 50 ersetzt.
+# Der Verify Score wird aus den vorhandenen Kategorien
+# neu normiert.
+# ============================================================
+
+def calculate_verify_score(metrics):
+
+    sector = metrics.get(
+        'sector',
+        'Default'
+    )
+
+    components = {}
+    confidence_parts = {}
+
+    # ========================================================
+    # 1. WACHSTUM
+    # ========================================================
+
+    growth_scores = []
+    growth_data_count = 0
+
+    earnings_growth = metrics.get(
+        'earnings_growth'
+    )
+
+    revenue_growth = metrics.get(
+        'revenue_growth'
+    )
+
+    long_term_growth = metrics.get(
+        'long_term_growth'
+    )
+
+    if pd.notna(earnings_growth):
+
+        growth_scores.append(
+            np.interp(
+                earnings_growth,
+                [-0.15, -0.05, 0.00, 0.05, 0.10, 0.20, 0.35],
+                [0, 25, 40, 55, 70, 88, 100]
+            )
+        )
+
+        growth_data_count += 1
+
+    if pd.notna(revenue_growth):
+
+        growth_scores.append(
+            np.interp(
+                revenue_growth,
+                [-0.15, -0.05, 0.00, 0.05, 0.10, 0.20, 0.35],
+                [0, 25, 40, 55, 70, 88, 100]
+            )
+        )
+
+        growth_data_count += 1
+
+    if pd.notna(long_term_growth):
+
+        growth_scores.append(
+            np.interp(
+                long_term_growth,
+                [-0.05, 0.00, 0.05, 0.10, 0.15, 0.25],
+                [20, 40, 55, 70, 85, 100]
+            )
+        )
+
+        growth_data_count += 1
+
+    if growth_scores:
+
+        components['growth'] = (
+            float(np.mean(growth_scores))
+        )
+
+    confidence_parts['growth'] = min(
+        100,
+        growth_data_count / 2 * 100
+    )
+
+    # ========================================================
+    # 2. PROFITABILITÄT
+    # ========================================================
+
+    profitability_scores = []
+    profitability_count = 0
+
+    if sector == 'Financial Services':
+
+        roe = metrics.get('roe')
+        net_margin = metrics.get('net_margin')
+
+        if pd.notna(roe):
+
+            profitability_scores.append(
+                np.interp(
+                    roe,
+                    [0.04, 0.08, 0.12, 0.18, 0.25, 0.35],
+                    [20, 40, 60, 80, 92, 100]
+                )
+            )
+
+            profitability_count += 1
+
+        if pd.notna(net_margin):
+
+            profitability_scores.append(
+                np.interp(
+                    net_margin,
+                    [0.03, 0.07, 0.12, 0.20, 0.30, 0.40],
+                    [20, 40, 60, 80, 92, 100]
+                )
+            )
+
+            profitability_count += 1
+
+    else:
+
+        roic = metrics.get('roic')
+        fcf_margin = metrics.get('fcf_margin')
+        gross_margin = metrics.get('gross_margin')
+        net_margin = metrics.get('net_margin')
+
+        if pd.notna(roic):
+
+            profitability_scores.append(
+                np.interp(
+                    roic,
+                    [0.04, 0.08, 0.12, 0.18, 0.25, 0.35],
+                    [20, 40, 60, 78, 92, 100]
+                )
+            )
+
+            profitability_count += 1
+
+        if pd.notna(fcf_margin):
+
+            profitability_scores.append(
+                np.interp(
+                    fcf_margin,
+                    [-0.05, 0.00, 0.05, 0.10, 0.20, 0.30],
+                    [0, 30, 55, 75, 92, 100]
+                )
+            )
+
+            profitability_count += 1
+
+        elif pd.notna(gross_margin):
+
+            profitability_scores.append(
+                np.interp(
+                    gross_margin,
+                    [0.15, 0.30, 0.45, 0.60, 0.75],
+                    [20, 40, 65, 85, 100]
+                )
+            )
+
+            profitability_count += 1
+
+        if pd.notna(net_margin):
+
+            profitability_scores.append(
+                np.interp(
+                    net_margin,
+                    [0.03, 0.07, 0.12, 0.20, 0.30],
+                    [20, 40, 60, 80, 100]
+                )
+            )
+
+            profitability_count += 1
+
+    if profitability_scores:
+
+        components['profitability'] = (
+            float(np.mean(profitability_scores))
+        )
+
+    confidence_parts['profitability'] = min(
+        100,
+        profitability_count / 2 * 100
+    )
+
+    # ========================================================
+    # 3. CASHFLOW
+    # ========================================================
+
+    cashflow_scores = []
+    cashflow_count = 0
+
+    fcf_margin = metrics.get(
+        'fcf_margin'
+    )
+
+    fcf_yield = metrics.get(
+        'fcf_yield'
+    )
+
+    fcf = metrics.get(
+        'fcf'
+    )
+
+    if pd.notna(fcf_margin):
+
+        cashflow_scores.append(
+            np.interp(
+                fcf_margin,
+                [-0.05, 0.00, 0.05, 0.10, 0.20, 0.30],
+                [0, 30, 55, 75, 92, 100]
+            )
+        )
+
+        cashflow_count += 1
+
+    if pd.notna(fcf_yield):
+
+        cashflow_scores.append(
+            np.interp(
+                fcf_yield,
+                [-0.02, 0.00, 0.03, 0.05, 0.08, 0.12],
+                [0, 25, 50, 70, 90, 100]
+            )
+        )
+
+        cashflow_count += 1
+
+    elif pd.notna(fcf):
+
+        cashflow_scores.append(
+            85 if fcf > 0 else 15
+        )
+
+        cashflow_count += 1
+
+    if cashflow_scores:
+
+        components['cashflow'] = (
+            float(np.mean(cashflow_scores))
+        )
+
+    confidence_parts['cashflow'] = min(
+        100,
+        cashflow_count / 2 * 100
+    )
+
+    # ========================================================
+    # 4. BILANZ
+    # ========================================================
+
+    balance_scores = []
+    balance_count = 0
+
+    if sector == 'Financial Services':
+
+        debt_to_equity = metrics.get(
+            'debt_to_equity'
+        )
+
+        cash_to_debt = metrics.get(
+            'cash_to_debt'
+        )
+
+        if (
+            pd.notna(debt_to_equity)
+            and debt_to_equity >= 0
+        ):
+
+            balance_scores.append(
+                np.interp(
+                    debt_to_equity,
+                    [20, 50, 100, 200, 400],
+                    [100, 90, 70, 40, 0]
+                )
+            )
+
+            balance_count += 1
+
+        if (
+            pd.notna(cash_to_debt)
+            and cash_to_debt >= 0
+        ):
+
+            balance_scores.append(
+                np.interp(
+                    cash_to_debt,
+                    [0.05, 0.20, 0.40, 0.75, 1.50],
+                    [10, 35, 60, 85, 100]
+                )
+            )
+
+            balance_count += 1
+
+    else:
+
+        net_debt_ebitda = metrics.get(
+            'net_debt_ebitda'
+        )
+
+        current_ratio = metrics.get(
+            'current_ratio'
+        )
+
+        debt_to_equity = metrics.get(
+            'debt_to_equity'
+        )
+
+        if pd.notna(net_debt_ebitda):
+
+            balance_scores.append(
+                np.interp(
+                    net_debt_ebitda,
+                    [-1, 0, 1, 2, 3, 4, 5, 6],
+                    [100, 100, 85, 70, 50, 30, 10, 0]
+                )
+            )
+
+            balance_count += 1
+
+        if pd.notna(current_ratio):
+
+            balance_scores.append(
+                np.interp(
+                    current_ratio,
+                    [0.5, 0.8, 1.0, 1.5, 2.0, 2.5],
+                    [10, 35, 55, 80, 95, 100]
+                )
+            )
+
+            balance_count += 1
+
+        if (
+            pd.isna(net_debt_ebitda)
+            and pd.notna(debt_to_equity)
+        ):
+
+            balance_scores.append(
+                np.interp(
+                    debt_to_equity,
+                    [10, 30, 60, 100, 150, 250, 400],
+                    [100, 90, 75, 55, 40, 15, 0]
+                )
+            )
+
+            balance_count += 1
+
+    if balance_scores:
+
+        components['balance'] = (
+            float(np.mean(balance_scores))
+        )
+
+    confidence_parts['balance'] = min(
+        100,
+        balance_count / 2 * 100
+    )
+
+    # ========================================================
+    # 5. BEWERTUNG
+    # ========================================================
+
+    valuation_scores = []
+    valuation_count = 0
+
+    forward_pe = metrics.get(
+        'forward_pe'
+    )
+
+    trailing_pe = metrics.get(
+        'trailing_pe'
+    )
+
+    peg = metrics.get(
+        'forward_peg'
+    )
+
+    ps = metrics.get(
+        'ps_ratio'
+    )
+
+    pb = metrics.get(
+        'pb_ratio'
+    )
+
+    if pd.notna(forward_pe) and forward_pe > 0:
+
+        valuation_scores.append(
+            np.interp(
+                forward_pe,
+                [5, 10, 15, 22, 35, 60],
+                [100, 90, 78, 60, 25, 0]
+            )
+        )
+
+        valuation_count += 1
+
+    elif pd.notna(trailing_pe) and trailing_pe > 0:
+
+        valuation_scores.append(
+            np.interp(
+                trailing_pe,
+                [5, 10, 15, 22, 35, 60],
+                [100, 90, 78, 60, 25, 0]
+            )
+        )
+
+        valuation_count += 1
+
+    if pd.notna(peg) and peg > 0:
+
+        valuation_scores.append(
+            np.interp(
+                peg,
+                [0.5, 0.8, 1.0, 1.5, 2.5, 4.0],
+                [100, 92, 80, 60, 20, 0]
+            )
+        )
+
+        valuation_count += 1
+
+    if sector == 'Financial Services':
+
+        if pd.notna(pb) and pb > 0:
+
+            valuation_scores.append(
+                np.interp(
+                    pb,
+                    [0.5, 0.8, 1.1, 1.6, 2.5, 4.0],
+                    [100, 92, 80, 55, 20, 0]
+                )
+            )
+
+            valuation_count += 1
+
+    else:
+
+        if pd.notna(ps) and ps > 0:
+
+            valuation_scores.append(
+                np.interp(
+                    ps,
+                    [0.5, 1.5, 3.0, 5.0, 8.0],
+                    [100, 85, 60, 30, 0]
+                )
+            )
+
+            valuation_count += 1
+
+    if valuation_scores:
+
+        components['valuation'] = (
+            float(np.mean(valuation_scores))
+        )
+
+    confidence_parts['valuation'] = min(
+        100,
+        valuation_count / 2 * 100
+    )
+
+    # ========================================================
+    # FINAL VERIFY
+    # ========================================================
+
+    available_components = [
+        value
+        for value in components.values()
+        if pd.notna(value)
+    ]
+
+    if not available_components:
+
+        verify_score = np.nan
+
+    else:
+
+        verify_score = float(
+            np.mean(
+                available_components
+            )
+        )
+
+    data_confidence = float(
+        np.mean(
+            list(
+                confidence_parts.values()
+            )
+        )
+    )
+
+    return (
+        round(verify_score, 1)
+        if pd.notna(verify_score)
+        else np.nan,
+        {
+            'growth': components.get(
+                'growth',
+                np.nan
+            ),
+            'profitability': components.get(
+                'profitability',
+                np.nan
+            ),
+            'cashflow': components.get(
+                'cashflow',
+                np.nan
+            ),
+            'balance': components.get(
+                'balance',
+                np.nan
+            ),
+            'valuation': components.get(
+                'valuation',
+                np.nan
+            )
+        },
+        round(
+            data_confidence
+        )
+    )
+
+
+# ============================================================
+# VERIFY PLAUSIBILITY
+# ============================================================
+
+def get_verify_plausibility(
+    total_score,
+    verify_score
+):
+
+    if (
+        pd.isna(total_score)
+        or pd.isna(verify_score)
+    ):
+        return "⚪ Nicht prüfbar"
+
+    difference = (
+        total_score
+        - verify_score
+    )
+
+    absolute_difference = abs(
+        difference
+    )
+
+    if absolute_difference <= 10:
+
+        return "🟢 Plausibel"
+
+    elif absolute_difference <= 20:
+
+        if difference > 0:
+            return "🟡 KPAX deutlich höher"
+
+        return "🟡 Verify deutlich höher"
+
+    else:
+
+        if difference > 0:
+            return "🔴 KPAX deutlich höher"
+
+        return "🔴 Verify deutlich höher"
 
 
 # ============================================================
@@ -3293,13 +3850,6 @@ def get_turnaround_status(metrics):
             and perf_6m < 0
         ):
 
-            if (
-                pd.notna(rsi)
-                and rsi < 50
-            ):
-
-                return "Turnaround?"
-
             return "Turnaround?"
 
         if (
@@ -3337,6 +3887,7 @@ def style_results_table(df):
 
     score_columns = [
         'Gesamtscore',
+        'Verify Score',
         'Fair Value Score',
         'Relative Valuation',
         'Quality',
@@ -3344,8 +3895,21 @@ def style_results_table(df):
         'Technical Trend'
     ]
 
+    score_columns = [
+        col
+        for col in score_columns
+        if col in df.columns
+    ]
+
     completeness_column = [
-        'Datenvollständigkeit (%)'
+        'Datenvollständigkeit (%)',
+        'Datenvertrauen (%)'
+    ]
+
+    completeness_column = [
+        col
+        for col in completeness_column
+        if col in df.columns
     ]
 
     styler = (
@@ -3356,25 +3920,41 @@ def style_results_table(df):
             vmin=0,
             vmax=100
         )
-        .background_gradient(
+    )
+
+    if completeness_column:
+
+        styler = styler.background_gradient(
             cmap='RdYlGn',
             subset=completeness_column,
             vmin=0,
             vmax=100
         )
-        .format({
-            'Gesamtscore': '{:.1f}',
-            'Fair Value Score': '{:.0f}',
-            'Relative Valuation': '{:.0f}',
-            'Quality': '{:.0f}',
-            'Risk': '{:.0f}',
-            'Technical Trend': '{:.0f}',
-            'Forward-KGV': '{:.1f}',
-            'Datenvollständigkeit (%)': '{:.0f}%'
-        })
-    )
 
-    return styler
+    format_dict = {
+        'Gesamtscore': '{:.1f}',
+        'Verify Score': '{:.0f}',
+        'Verify Δ': '{:+.0f}',
+        'Fair Value Score': '{:.0f}',
+        'Relative Valuation': '{:.0f}',
+        'Quality': '{:.0f}',
+        'Risk': '{:.0f}',
+        'Technical Trend': '{:.0f}',
+        'Forward-KGV': '{:.1f}',
+        'Datenvollständigkeit (%)': '{:.0f}%',
+        'Datenvertrauen (%)': '{:.0f}%'
+    }
+
+    format_dict = {
+        key: value
+        for key, value in format_dict.items()
+        if key in df.columns
+    }
+
+    return styler.format(
+        format_dict,
+        na_rep="–"
+    )
 
 
 # ============================================================
@@ -3382,12 +3962,12 @@ def style_results_table(df):
 # ============================================================
 
 st.title(
-    "📊 Quant-Aktien-Screener V11.0"
+    "📊 Quant-Aktien-Screener V11.1"
 )
 
 st.caption(
     "Fundamentaler und technischer Aktien-Score "
-    "mit Fair Value Score, relativer Bewertung, Qualität, Risiko und technischem Trend"
+    "mit unabhängiger Fundamental-Verify-Kontrolle"
 )
 
 
@@ -3583,6 +4163,37 @@ if st.button(
             active_weights
         )
 
+        # ----------------------------------------------------
+        # INDEPENDENT VERIFY
+        # ----------------------------------------------------
+
+        (
+            verify_score,
+            verify_components,
+            data_confidence
+        ) = calculate_verify_score(
+            metrics
+        )
+
+        verify_difference = np.nan
+
+        if (
+            pd.notna(score)
+            and pd.notna(verify_score)
+        ):
+
+            verify_difference = (
+                score
+                - verify_score
+            )
+
+        plausibility = (
+            get_verify_plausibility(
+                score,
+                verify_score
+            )
+        )
+
         if (
             pd.notna(score)
             and score < min_score
@@ -3607,6 +4218,18 @@ if st.button(
 
             'Gesamtscore':
                 score,
+
+            'Verify Score':
+                verify_score,
+
+            'Verify Δ':
+                verify_difference,
+
+            'Plausibilität':
+                plausibility,
+
+            'Datenvertrauen (%)':
+                data_confidence,
 
             'Datenvollständigkeit (%)':
                 metrics['data_completeness'],
@@ -3688,8 +4311,11 @@ if st.button(
         'Risk',
         'Technical Trend',
         'Gesamtscore',
+        'Verify Score',
+        'Verify Δ',
         'Forward-KGV',
-        'Datenvollständigkeit (%)'
+        'Datenvollständigkeit (%)',
+        'Datenvertrauen (%)'
     ]
 
     for col in numeric_columns:
@@ -3698,6 +4324,25 @@ if st.button(
             results_df[col],
             errors='coerce'
         )
+
+    # --------------------------------------------------------
+    # VERIFY RANK
+    # --------------------------------------------------------
+
+    results_df['Verify Rang'] = (
+        results_df['Verify Score']
+        .rank(
+            ascending=False,
+            method='min'
+        )
+    )
+
+    results_df['Verify Rang'] = (
+        results_df['Verify Rang']
+        .where(
+            results_df['Verify Score'].notna()
+        )
+    )
 
     results_df = results_df.sort_values(
         'Gesamtscore',
@@ -3713,20 +4358,82 @@ if st.button(
         "📋 Ergebnisse"
     )
 
+    st.caption(
+        "Verify ist eine unabhängige Kontrollrechnung "
+        "und fließt nicht in den Gesamtscore ein."
+    )
+
+    display_columns = [
+        'Ticker',
+        'Name',
+        'Sektor',
+        'Gesamtscore',
+        'Verify Score',
+        'Verify Rang',
+        'Verify Δ',
+        'Plausibilität',
+        'Datenvertrauen (%)',
+        'Datenvollständigkeit (%)',
+        'Empfehlung',
+        'Turnaround Status',
+        'Fair Value Score',
+        'Relative Valuation',
+        'Quality',
+        'Risk',
+        'Technical Trend',
+        'Forward-KGV'
+    ]
+
+    display_columns = [
+        col
+        for col in display_columns
+        if col in results_df.columns
+    ]
+
+    table_df = results_df[
+        display_columns
+    ].copy()
+
+    table_df['Verify Rang'] = (
+        table_df['Verify Rang']
+        .round(0)
+    )
+
     st.dataframe(
         style_results_table(
-            results_df
+            table_df
         ),
         use_container_width=True,
         hide_index=True
     )
 
     # ========================================================
-    # SCORE ANALYSIS
+    # QUICK INTERPRETATION
     # ========================================================
 
     st.subheader(
-        "🧮 Score-Berechnung"
+        "🔎 Verify-Kontrolle"
+    )
+
+    st.markdown(
+        """
+**So ist die Kontrolle zu lesen:**
+
+- 🟢 **Plausibel:** KPAX und Verify liegen maximal 10 Punkte auseinander.
+- 🟡 **Prüfen:** 11–20 Punkte Differenz.
+- 🔴 **Auffällig:** mehr als 20 Punkte Differenz.
+- **KPAX > Verify:** Das Hauptmodell ist optimistischer als die einfache Fundamentalkontrolle.
+- **Verify > KPAX:** Das Unternehmen wirkt fundamental besser, als es der KPAX vermuten lässt.
+- **Datenvertrauen:** Qualität/Vollständigkeit der für den Verify verwendeten Kennzahlen – **kein Unternehmensscore**.
+        """
+    )
+
+    # ========================================================
+    # DETAILED ANALYSIS
+    # ========================================================
+
+    st.subheader(
+        "🔬 Verify-Detailanalyse"
     )
 
     selected_ticker = st.selectbox(
@@ -3751,6 +4458,26 @@ if st.button(
             )
         )
 
+        (
+            detail_verify,
+            detail_verify_components,
+            detail_data_confidence
+        ) = calculate_verify_score(
+            detail_metrics
+        )
+
+        detail_difference = np.nan
+
+        if (
+            pd.notna(detail_score)
+            and pd.notna(detail_verify)
+        ):
+
+            detail_difference = (
+                detail_score
+                - detail_verify
+            )
+
         st.markdown(
             f"### {detail_metrics['name']} "
             f"({selected_ticker})"
@@ -3760,12 +4487,134 @@ if st.button(
             f"Sektor: {detail_metrics['sector']}"
         )
 
-        # ----------------------------------------------------
-        # CURRENT WEIGHTS
-        # ----------------------------------------------------
+        # ====================================================
+        # VERIFY SCORE
+        # ====================================================
 
         st.markdown(
-            "#### Aktuelle Gewichtung"
+            "#### 🛡️ Fundamental Verify"
+        )
+
+        verify_col1, verify_col2, verify_col3, verify_col4 = (
+            st.columns(4)
+        )
+
+        with verify_col1:
+
+            st.metric(
+                "Verify Score",
+                (
+                    f"{detail_verify:.0f}"
+                    if pd.notna(detail_verify)
+                    else "–"
+                )
+            )
+
+        with verify_col2:
+
+            st.metric(
+                "KPAX Score",
+                (
+                    f"{detail_score:.1f}"
+                    if pd.notna(detail_score)
+                    else "–"
+                )
+            )
+
+        with verify_col3:
+
+            st.metric(
+                "KPAX − Verify",
+                (
+                    f"{detail_difference:+.0f}"
+                    if pd.notna(detail_difference)
+                    else "–"
+                )
+            )
+
+        with verify_col4:
+
+            st.metric(
+                "Datenvertrauen",
+                f"{detail_data_confidence}%"
+            )
+
+        st.markdown(
+            f"**Plausibilität:** "
+            f"{get_verify_plausibility(detail_score, detail_verify)}"
+        )
+
+        # ====================================================
+        # VERIFY COMPONENT TABLE
+        # ====================================================
+
+        verify_display = pd.DataFrame({
+
+            'Fundamentaler Bereich': [
+                'Wachstum',
+                'Profitabilität',
+                'Cashflow',
+                'Bilanz',
+                'Bewertung'
+            ],
+
+            'Score': [
+                detail_verify_components['growth'],
+                detail_verify_components['profitability'],
+                detail_verify_components['cashflow'],
+                detail_verify_components['balance'],
+                detail_verify_components['valuation']
+            ],
+
+            'Gewichtung': [
+                '20%',
+                '20%',
+                '20%',
+                '20%',
+                '20%'
+            ],
+
+            'Bedeutung': [
+                'Umsatz / Gewinn / langfristiges Wachstum',
+                'ROIC/ROE / Margen',
+                'FCF / FCF-Marge / FCF-Rendite',
+                'Verschuldung / Liquidität',
+                'KGV / PEG / P/S bzw. P/B'
+            ]
+        })
+
+        verify_display['Score'] = pd.to_numeric(
+            verify_display['Score'],
+            errors='coerce'
+        )
+
+        st.dataframe(
+            verify_display.style
+            .background_gradient(
+                cmap='RdYlGn',
+                subset=['Score'],
+                vmin=0,
+                vmax=100
+            )
+            .format({
+                'Score': '{:.0f}'
+            }, na_rep='–'),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.caption(
+            "Der Verify Score ist der einfache Durchschnitt "
+            "der verfügbaren fünf Fundamentalkategorien. "
+            "Fehlende Kategorien werden NICHT mit 50 Punkten ersetzt."
+        )
+
+        # ====================================================
+        # KPAX CATEGORY ANALYSIS
+        # ====================================================
+
+        st.markdown(
+            "#### ⚙️ KPAX-Gewichtung"
         )
 
         weight_display = pd.DataFrame({
@@ -3844,9 +4693,9 @@ if st.button(
             hide_index=True
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # TOTAL SCORE
-        # ----------------------------------------------------
+        # ====================================================
 
         st.markdown(
             "#### Gesamtscore"
@@ -3879,9 +4728,9 @@ if st.button(
                 f"{detail_metrics['data_completeness']}%"
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # FORMULA EXPLANATION
-        # ----------------------------------------------------
+        # ====================================================
 
         contribution_values = []
 
@@ -3924,7 +4773,7 @@ if st.button(
 
         st.caption(
             "Gesamtscore = gewichtete Summe der Einzel-Scores. "
-            "Fehlende Kategorien werden – wie bisher – mit 50 Punkten berücksichtigt."
+            "Fehlende KPAX-Kategorien werden mit 50 Punkten berücksichtigt."
         )
 
         st.code(
@@ -3933,9 +4782,9 @@ if st.button(
             language=None
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # STATUS
-        # ----------------------------------------------------
+        # ====================================================
 
         st.markdown(
             f"**Empfehlung:** "
